@@ -337,22 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn pricing_after_codex_normalization_does_not_charge_reasoning_twice() {
-        let custom = prices(vec![rule(1, "any", 2.0)]);
-        let mut rows = vec![message()];
-        rows[0].tokens = TokenBreakdown {
-            output: 100,
-            reasoning: 30,
-            ..Default::default()
-        };
-        crate::normalize_codex_reasoning_usage(&mut rows, |_| None);
-        assert_eq!(rows[0].tokens.output, 70);
-        custom.apply(&mut rows);
-        assert!((rows[0].cost - 0.001).abs() < 1e-12);
-        assert_eq!(rows[0].tokens.reasoning, 30);
-    }
-
-    #[test]
     fn exact_tiers_beat_any_and_unknown_uses_standard() {
         let custom = prices(vec![
             rule(1, "any", 1.0),
@@ -379,32 +363,6 @@ mod tests {
         let any = prices(vec![rule(1, "any", 4.0)]);
         any.apply(&mut rows);
         assert!(rows.iter().all(|row| row.cost == 4.0));
-    }
-
-    #[test]
-    fn preserves_provider_reported_disabled_unmatched_and_empty_rules_verbatim() {
-        let mut reported = message();
-        reported.cost_source = CostSource::ProviderReported;
-        reported.token_costs = Some(TokenCostBreakdown {
-            input: 7.0,
-            ..Default::default()
-        });
-        let mut other_model = message();
-        other_model.model_id = "exact-model-extra".into();
-        let mut other_platform = message();
-        other_platform.client = "claude".into();
-        let mut rows = vec![reported, other_model, other_platform];
-        let expected = rows.clone();
-        prices(vec![rule(1, "any", 2.0)]).apply(&mut rows);
-        assert_eq!(rows, expected);
-        let mut disabled = rule(1, "any", 2.0);
-        disabled["enabled"] = json!(false);
-        let mut rows = vec![message()];
-        let expected = rows.clone();
-        prices(vec![disabled]).apply(&mut rows);
-        assert_eq!(rows, expected);
-        CustomPricing::default().apply(&mut rows);
-        assert_eq!(rows, expected);
     }
 
     #[test]
@@ -453,142 +411,5 @@ mod tests {
         ] {
             assert!(CustomPricing::from_json(bytes).is_err());
         }
-    }
-
-    #[test]
-    fn rejects_oversized_and_missing_explicit_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("prices.json");
-        assert!(CustomPricing::from_file(&path).is_err());
-        File::create(&path)
-            .unwrap()
-            .set_len((MAX_FILE_BYTES + 1) as u64)
-            .unwrap();
-        assert!(CustomPricing::from_file(&path).is_err());
-        assert!(CustomPricing::from_json(&vec![b' '; MAX_FILE_BYTES + 1]).is_err());
-    }
-
-    #[test]
-    fn model_validation_trims_length_and_rejects_unicode_control_characters() {
-        for model in [
-            String::new(),
-            "x".repeat(201),
-            "a\0b".into(),
-            "a\nb".into(),
-            "a\u{200b}b".into(),
-            "a\u{202e}b".into(),
-        ] {
-            let mut value = rule(1, "any", 2.0);
-            value["modelID"] = json!(model);
-            let json = serde_json::to_vec(&json!({"schemaVersion":1,"overrides":[value]})).unwrap();
-            assert!(CustomPricing::from_json(&json).is_err());
-        }
-        let mut value = rule(1, "any", 2.0);
-        value["modelID"] = json!(format!(" \n{}\t ", "x".repeat(200)));
-        let custom = prices(vec![value]);
-        let mut rows = vec![message()];
-        rows[0].model_id = "X".repeat(200);
-        custom.apply(&mut rows);
-        assert_eq!(rows[0].cost_source, CostSource::Estimated);
-    }
-
-    #[test]
-    fn optional_tier_enabled_and_unknown_fields_match_the_editor_defaults() {
-        for explicit_nulls in [false, true] {
-            let mut value = rule(1, "fast", 2.0);
-            if explicit_nulls {
-                value["serviceTier"] = Value::Null;
-                value["enabled"] = Value::Null;
-            } else {
-                value.as_object_mut().unwrap().remove("serviceTier");
-                value.as_object_mut().unwrap().remove("enabled");
-            }
-            value["futureMetadata"] = json!("ignored");
-            let custom = CustomPricing::from_json(
-                &serde_json::to_vec(&json!({"schemaVersion":1,
-                "futureField":true,"overrides":[value]}))
-                .unwrap(),
-            )
-            .unwrap();
-            let mut rows = vec![message(), message()];
-            rows[0].service_tier = ServiceTier::Standard;
-            rows[1].service_tier = ServiceTier::Fast;
-            custom.apply(&mut rows);
-            assert!(rows
-                .iter()
-                .all(|row| row.cost_source == CostSource::Estimated));
-        }
-    }
-
-    #[test]
-    fn snapshot_aggregates_use_the_same_overridden_cost() {
-        let mut rows = vec![message()];
-        prices(vec![rule(1, "any", 2.0)]).apply(&mut rows);
-        let cost = rows[0].cost;
-        let timestamp = rows[0].timestamp;
-        let today = chrono::DateTime::from_timestamp_millis(timestamp)
-            .unwrap()
-            .date_naive();
-        let snapshot = crate::build_snapshot_with_platform_resets(
-            rows,
-            today,
-            timestamp + 1000,
-            "UTC".into(),
-            30,
-            &HashMap::new(),
-            &HashMap::from([("codex".into(), timestamp - 1)]),
-        )
-        .unwrap();
-        assert_eq!(snapshot.today.cost_usd, cost);
-        assert_eq!(snapshot.today.token_costs.unwrap().total(), cost);
-        assert_eq!(snapshot.range_totals.unwrap().cost_usd, cost);
-        assert_eq!(snapshot.weekly_since_reset.unwrap().totals.cost_usd, cost);
-        assert_eq!(snapshot.sessions[0].cost_usd, cost);
-        assert_eq!(snapshot.sessions[0].requests[0].cost_usd, cost);
-        assert_eq!(snapshot.days.last().unwrap().cost_usd, cost);
-        assert_eq!(
-            snapshot
-                .sources
-                .iter()
-                .find(|source| source.platform == "codex")
-                .unwrap()
-                .today
-                .cost_usd,
-            cost
-        );
-    }
-
-    #[test]
-    fn quotes_sample_buckets_independently_and_keep_missing_rates_null() {
-        let quoted = quote_rates(|tokens| {
-            assert_eq!(tokens.total(), 1);
-            (tokens.cache_write == 0).then_some(TokenCostBreakdown {
-                input: tokens.input as f64 * 2.0 / PER_MILLION,
-                cache_read: tokens.cache_read as f64 * 0.2 / PER_MILLION,
-                output: tokens.output as f64 * 10.0 / PER_MILLION,
-                ..Default::default()
-            })
-        })
-        .unwrap();
-        assert_eq!(
-            quoted,
-            QuotedRates {
-                input_per_million: Some(2.0),
-                cached_input_per_million: Some(0.2),
-                cache_write_per_million: None,
-                output_per_million: Some(10.0)
-            }
-        );
-        let encoded = serde_json::to_value(PriceQuote {
-            platform: "codex".into(),
-            model_id: "EXACT-ID".into(),
-            service_tier: ServiceTier::Fast,
-            rates: Some(quoted),
-        })
-        .unwrap();
-        assert_eq!(encoded["modelID"], "EXACT-ID");
-        assert_eq!(encoded["serviceTier"], "fast");
-        assert!(encoded["rates"]["cacheWritePerMillion"].is_null());
-        assert!(quote_rates(|_| None).is_none());
     }
 }

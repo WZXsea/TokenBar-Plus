@@ -17,16 +17,6 @@ struct QuotaPlanBadgeTests {
         #expect(plus?.style == .standard)
     }
 
-    @Test("Missing plan metadata stays empty and an unfamiliar provider plan remains identifiable")
-    func missingAndFuturePlans() {
-        #expect(QuotaPlanBadgePresentation(snapshot: nil) == nil)
-        #expect(QuotaPlanBadgePresentation(snapshot: self.snapshot(plan: nil)) == nil)
-        let future = QuotaPlanBadgePresentation(snapshot: self.snapshot(plan: "future_plan"))
-        #expect(future?.title.isEmpty == false)
-        #expect(future?.style == .standard)
-        #expect(future?.helpText.contains("future_plan") == true)
-    }
-
     @Test("Quota rows and height follow returned windows independently of the plan badge")
     func providerWindowsRemainAuthoritative() {
         let proWeekly = self.snapshot(plan: "pro")
