@@ -49,6 +49,48 @@ struct SessionHistoryCancellationTests {
         #expect(provider.requestedDates == [historicalDate, historicalDate])
     }
 
+    @Test("History browsing retains sixteen recent dates and reloads the evicted date")
+    func historyCacheEvictsLeastRecentlyUsedDate() async throws {
+        let dates = (1 ... 18).map { String(format: "2026-09-%02d", $0) }
+        let snapshot = ActivitySnapshot(
+            schemaVersion: 11, generatedAtMs: 2_000, timezone: "UTC", today: .zero,
+            sessions: [Self.session("today", endedAtMs: 2_000)],
+            days: dates.map {
+                DailySummary(date: $0, tokens: .zero, costUsd: 0, requestCount: 1, sessionCount: 1)
+            })
+        let harness = try await HistoryCancellationHarness.make(snapshot: snapshot)
+        defer { harness.tearDown() }
+        let controller = harness.controller
+        let provider = harness.provider
+
+        for index in 0 ..< 16 {
+            controller.selectActivityDateForTesting(dates[index])
+            try await self.waitUntil { provider.hasPendingRequest(index + 1) }
+            provider.succeedRequest(index + 1, sessions: [])
+            try await self.waitUntil { !controller.isLoadingSessionHistoryForTesting() }
+        }
+        #expect(controller.cachedSessionHistoryDatesForTesting() == Array(dates.prefix(16)))
+        // Revisiting a cached date updates recency without an additional helper request.
+        controller.selectActivityDateForTesting(dates[0])
+        #expect(provider.requestedDates.count == 16)
+        controller.selectActivityDateForTesting(dates[16])
+        try await self.waitUntil { provider.hasPendingRequest(17) }
+        provider.succeedRequest(17, sessions: [])
+        try await self.waitUntil { !controller.isLoadingSessionHistoryForTesting() }
+        let cached = controller.cachedSessionHistoryDatesForTesting()
+        #expect(cached.count == 16)
+        #expect(cached.contains(dates[0]))
+        #expect(!cached.contains(dates[1]))
+        #expect(cached.last == dates[16])
+
+        controller.selectActivityDateForTesting(dates[1])
+        try await self.waitUntil { provider.hasPendingRequest(18) }
+        #expect(provider.requestedDates.last == dates[1])
+        provider.succeedRequest(18, sessions: [])
+        try await self.waitUntil { !controller.isLoadingSessionHistoryForTesting() }
+        #expect(controller.cachedSessionHistoryDatesForTesting().count == 16)
+    }
+
     private func waitUntil(_ condition: () -> Bool) async throws {
         for _ in 0 ..< 400 {
             if condition() { return }

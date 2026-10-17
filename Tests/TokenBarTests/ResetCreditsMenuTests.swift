@@ -24,7 +24,7 @@ struct ResetCreditsMenuTests {
         #expect(row.hasSubmenu)
         #expect(row.isEnabled)
         #expect(!row.isHidden)
-        #expect(row.view?.frame.height == DashboardOverviewView.resetCreditsIncrement)
+        #expect(row.view?.frame.height == DashboardLayout.resetCreditsIncrement)
         let quota = try #require(harness.model.quotaSnapshot)
         let fullHeight = DashboardSectionContentView.preferredHeight(
             for: .quota, quota: quota, showsWeeklyUsage: true)

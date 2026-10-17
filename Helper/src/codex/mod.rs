@@ -196,9 +196,7 @@ fn collect_jsonl_files(directory: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
-    let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.path());
-    for entry in entries {
+    for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -939,6 +937,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(messages.len(), 1);
+        assert!(messages[0].session_path.as_deref().unwrap()
+            .ends_with("archived_sessions/rollout-2026-07-01-copy.jsonl"));
         fs::remove_dir_all(home).unwrap();
     }
 

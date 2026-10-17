@@ -38,6 +38,7 @@ struct DashboardFastRefreshTests {
         // Each controlled wake drives the real model timer through a complete
         // round, including the model state that the dashboard displays.
         for second in 1 ... 60 {
+            model.notifyActivityChanged()
             #expect(await sleeper.wake(pendingSleep))
             pendingSleep = try #require(await sleeps.next())
             #expect(pendingSleep.duration == .seconds(1))
@@ -71,6 +72,94 @@ struct DashboardFastRefreshTests {
         model.stop()
         await sleeper.finish()
     }
+
+    @Test("Idle polling slows down and source events wake one serialized refresh", .timeLimit(.minutes(1)))
+    func idleAndWake() async throws {
+        let clock = FastRefreshClock()
+        let sleeper = ControlledRefreshSleeper(clock: clock)
+        let quota = FastRefreshQuotaProvider(clock: clock)
+        let activity = FastRefreshActivityProvider(clock: clock)
+        let model = DashboardModel(
+            quotaService: quota,
+            activityService: activity,
+            cache: nil,
+            quotaRefreshInterval: .seconds(1),
+            activityRefreshInterval: .seconds(1),
+            sleep: { try await sleeper.sleep($0) },
+            now: { clock.now })
+        defer {
+            model.stop()
+            Task { await sleeper.finish() }
+        }
+        await model.start()
+        var sleeps = sleeper.events.makeAsyncIterator()
+        let first = try #require(await sleeps.next())
+        #expect(first.duration == .seconds(1))
+        clock.advance(by: 60)
+        #expect(await sleeper.wake(first))
+        let idle = try #require(await sleeps.next())
+        #expect(idle.duration == .seconds(300))
+        #expect(await activity.fetchCount == 2)
+
+        model.notifyActivityChanged()
+        // A burst during the active window extends the window and coalesces
+        // into the first wake rather than launching another provider scan.
+        for _ in 0 ..< 20 { model.notifyActivityChanged() }
+        let resumed = try #require(await sleeps.next())
+        #expect(resumed.duration == .seconds(1))
+        #expect(await activity.fetchCount == 3)
+        #expect(await activity.maximumConcurrentFetches == 1)
+        #expect(await sleeper.wake(idle) == false)
+
+        model.stop()
+        model.notifyActivityChanged()
+        await Task.yield()
+        #expect(await activity.fetchCount == 3)
+        await sleeper.finish()
+    }
+
+    @Test("Manual refresh discovering activity replaces an outstanding idle sleep", .timeLimit(.minutes(1)))
+    func manualRefreshResumesActiveTimer() async throws {
+        let clock = FastRefreshClock()
+        let sleeper = ControlledRefreshSleeper(clock: clock)
+        let activity = FastRefreshActivityProvider(clock: clock)
+        let model = DashboardModel(
+            quotaService: FastRefreshQuotaProvider(clock: clock),
+            activityService: activity,
+            cache: nil,
+            quotaRefreshInterval: .seconds(1),
+            activityRefreshInterval: .seconds(1),
+            sleep: { try await sleeper.sleep($0) },
+            now: { clock.now })
+        defer {
+            model.stop()
+            Task { await sleeper.finish() }
+        }
+        await model.start()
+        var sleeps = sleeper.events.makeAsyncIterator()
+        let first = try #require(await sleeps.next())
+        clock.advance(by: 60)
+        #expect(await sleeper.wake(first))
+        let idle = try #require(await sleeps.next())
+        #expect(idle.duration == .seconds(300))
+
+        await activity.recordSourceActivity()
+        await model.refreshActivity()
+        let active = try #require(await sleeps.next())
+        #expect(active.duration == .seconds(1))
+        #expect(await activity.fetchCount == 3)
+        // Events following a manual refresh remain coalesced, and the formerly
+        // outstanding five-minute sleep has already been replaced.
+        model.notifyActivityChanged()
+        #expect(await sleeper.wake(active))
+        let next = try #require(await sleeps.next())
+        #expect(next.duration == .seconds(1))
+        #expect(await activity.fetchCount == 4)
+        #expect(await activity.maximumConcurrentFetches == 1)
+        #expect(await sleeper.wake(idle) == false)
+        await sleeper.finish()
+    }
+
 }
 
 private final class FastRefreshClock: @unchecked Sendable {
@@ -173,6 +262,7 @@ private actor FastRefreshActivityProvider: ActivityProviding {
     private let pauseContinuation: AsyncStream<Int>.Continuation
     private let clock: FastRefreshClock
     private var shouldPauseNextFetch = false
+    private var sourceActivityTimestampMs: Int64?
     private var pausedFetch: CheckedContinuation<Void, Never>?
     private var concurrentFetches = 0
     private(set) var maximumConcurrentFetches = 0
@@ -200,6 +290,9 @@ private actor FastRefreshActivityProvider: ActivityProviding {
                 self.pauseContinuation.yield(self.fetchCount)
             }
         }
+        if let sourceActivityTimestampMs {
+            return TestFixtures.activity(generatedAtMs: sourceActivityTimestampMs)
+        }
         return ActivitySnapshot(
             schemaVersion: 4,
             generatedAtMs: self.clock.milliseconds,
@@ -207,6 +300,10 @@ private actor FastRefreshActivityProvider: ActivityProviding {
             today: .zero,
             sessions: [],
             days: [])
+    }
+
+    func recordSourceActivity() {
+        self.sourceActivityTimestampMs = self.clock.milliseconds
     }
 
     func pauseNextFetch() {

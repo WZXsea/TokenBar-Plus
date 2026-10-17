@@ -21,7 +21,7 @@ struct DashboardSummaryView: View {
         showsAntigravity: Bool,
         sections: [TokenBarDashboardSection] = DashboardSummaryView.defaultSections) -> CGFloat
     {
-        DashboardOverviewView.headerHeight(
+        DashboardLayout.headerHeight(
             showsClaude: showsClaude,
             showsGrok: showsGrok,
             showsAntigravity: showsAntigravity)
@@ -42,7 +42,7 @@ struct DashboardSummaryView: View {
                 showsAntigravity: self.showsAntigravity,
                 accentColor: self.accentColor,
                 onSelectScope: nil)
-                .frame(height: DashboardOverviewView.headerHeight(
+                .frame(height: DashboardLayout.headerHeight(
                     showsClaude: self.showsClaude,
                     showsGrok: self.showsGrok,
                     showsAntigravity: self.showsAntigravity))
@@ -107,11 +107,11 @@ struct DashboardSectionContentView: View {
         switch section {
         case .speed: SpeedSummarySection.preferredHeight + 1
         case .quota:
-            DashboardOverviewView.quotaHeight(quota: quota) + 1
+            DashboardLayout.quotaHeight(quota: quota) + 1
                 + (showsWeeklyUsage ? 40 : 0)
-                - (!showsResetCredits && quota?.resetCredits != nil ? DashboardOverviewView.resetCreditsIncrement : 0)
-        case .today: DashboardOverviewView.todayHeight + 1
-        case .weeklyReset: DashboardOverviewView.weeklyResetActivityHeight + 1
+                - (!showsResetCredits && quota?.resetCredits != nil ? DashboardLayout.resetCreditsIncrement : 0)
+        case .today: DashboardLayout.todayHeight + 1
+        case .weeklyReset: DashboardLayout.weeklyResetActivityHeight + 1
         case .activity, .memory, .recentSessions: 0
         }
     }
@@ -263,7 +263,7 @@ struct SpeedSummarySection: View {
     }
 }
 
-struct DashboardOverviewView: View {
+enum DashboardLayout {
     static let headerHeight: CGFloat = 64
     static let compactHeaderHeight: CGFloat = 28
     private static let unavailableQuotaHeight: CGFloat = 48
@@ -272,27 +272,6 @@ struct DashboardOverviewView: View {
     static let resetCreditsIncrement: CGFloat = 24
     static let todayHeight: CGFloat = 112
     static let weeklyResetActivityHeight: CGFloat = 64
-
-    @Bindable var model: DashboardModel
-    let showsClaude: Bool
-    let showsGrok: Bool
-    let showsAntigravity: Bool
-    let usesWeekdayWeeklyPacing: Bool
-    let accentColor: Color
-
-    static func preferredHeight(
-        quota: QuotaSnapshot?,
-        providesQuota: Bool = true,
-        showsClaude: Bool,
-        showsGrok: Bool,
-        showsAntigravity: Bool) -> CGFloat
-    {
-        self.headerHeight(
-            showsClaude: showsClaude,
-            showsGrok: showsGrok,
-            showsAntigravity: showsAntigravity)
-            + self.contentHeight(quota: quota, providesQuota: providesQuota)
-    }
 
     static func headerHeight(
         showsClaude: Bool,
@@ -305,16 +284,6 @@ struct DashboardOverviewView: View {
             showsAntigravity: showsAntigravity).count > 1
             ? self.headerHeight
             : self.compactHeaderHeight
-    }
-
-    static func contentHeight(
-        quota: QuotaSnapshot?,
-        providesQuota: Bool = true) -> CGFloat
-    {
-        (providesQuota ? self.quotaHeight(quota: quota) : 0)
-            + self.todayHeight
-            + self.weeklyResetActivityHeight
-            + 2
     }
 
     static func quotaHeight(
@@ -332,27 +301,6 @@ struct DashboardOverviewView: View {
             hasWeekly: quota?.weekly != nil,
             hasFiveHour: quota?.session != nil,
             hasResetCredits: quota?.resetCredits != nil)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            DashboardHeaderView(
-                model: self.model,
-                showsClaude: self.showsClaude,
-                showsGrok: self.showsGrok,
-                showsAntigravity: self.showsAntigravity,
-                accentColor: self.accentColor,
-                onSelectScope: nil)
-                .frame(height: Self.headerHeight(
-                    showsClaude: self.showsClaude,
-                    showsGrok: self.showsGrok,
-                    showsAntigravity: self.showsAntigravity))
-            DashboardOverviewContentView(
-                model: self.model,
-                usesWeekdayWeeklyPacing: self.usesWeekdayWeeklyPacing,
-                accentColor: self.accentColor)
-        }
-        .background(Color.clear)
     }
 }
 
@@ -408,46 +356,6 @@ struct DashboardHeaderView: View {
             return self.model.activity.isRefreshing ? "正在刷新…" : "等待数据"
         }
         return "更新于\(date.compactPastText)"
-    }
-}
-
-struct DashboardOverviewContentView: View {
-    @Bindable var model: DashboardModel
-    let usesWeekdayWeeklyPacing: Bool
-    let accentColor: Color
-
-    var body: some View {
-        let platform = self.model.scope.platform
-        let quotaState = self.model.quotaState(for: platform)
-        VStack(spacing: 0) {
-            if self.model.providesQuota(for: platform) {
-                Divider().padding(.horizontal, 12)
-                QuotaSummarySection(
-                    state: quotaState,
-                    usesWeekdayWeeklyPacing: self.usesWeekdayWeeklyPacing,
-                    accentColor: self.accentColor,
-                    dayBreakdown: self.model.weeklyQuotaDayBreakdown(for: platform))
-                    .frame(
-                        height: DashboardOverviewView.quotaHeight(quota: quotaState.value),
-                        alignment: .top)
-            }
-            Divider().padding(.horizontal, 12)
-            TodaySummarySection(
-                state: self.model.visibleActivity,
-                weeklyQuotaUsage: self.model.weeklyQuotaUsageToday(for: platform),
-                dayBreakdown: self.model.weeklyQuotaDayBreakdown(for: platform),
-                usesWeekdayWeeklyPacing: self.usesWeekdayWeeklyPacing,
-                accentColor: self.accentColor)
-                .frame(height: DashboardOverviewView.todayHeight)
-            Divider().padding(.horizontal, 12)
-            WeeklyResetActivitySection(
-                quota: quotaState.value,
-                state: self.model.visibleActivity,
-                usesWeekdayWeeklyPacing: self.usesWeekdayWeeklyPacing,
-                accentColor: self.accentColor)
-                .frame(height: DashboardOverviewView.weeklyResetActivityHeight)
-        }
-        .background(Color.clear)
     }
 }
 
@@ -868,7 +776,7 @@ private struct ResetCreditsRow: View {
 }
 
 struct ResetCreditsMenuRowView: View {
-    static let preferredHeight = DashboardOverviewView.resetCreditsIncrement
+    static let preferredHeight = DashboardLayout.resetCreditsIncrement
     let snapshot: QuotaResetCreditsSnapshot
 
     var body: some View {

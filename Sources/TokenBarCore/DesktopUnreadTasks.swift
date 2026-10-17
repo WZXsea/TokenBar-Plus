@@ -334,10 +334,12 @@ struct ClaudeUnreadTracker {
     }
 
     mutating func update(
-        store: Set<String>,
-        sessions: [String: ClaudeSessionSnapshot],
+        store: Set<String>? = nil,
+        sessions: [String: ClaudeSessionSnapshot]? = nil,
         now: Date) -> Int
     {
+        let store = store ?? self.store
+        let sessions = sessions ?? self.sessions
         if !self.hasBaseline || store != self.store {
             self.store = store
             self.storeChangedAt = now
@@ -389,9 +391,11 @@ final class DesktopUnreadTaskWatcher: @unchecked Sendable {
     private let publish: @Sendable (TokenPlatform, Int) -> Void
     private var stream: FSEventStreamRef?
     private var codexPaths: Set<String> = []
-    private var claudePrefixes: [String] = []
+    private var claudeStoragePrefix: String?
+    private var claudeSessionsPrefix: String?
     private var claudeTracker = ClaudeUnreadTracker()
     private var claudeRecountScheduledAt: Date?
+    private var claudeExpiryRecount: DispatchWorkItem?
     private var isStopped = false
 
     init(
@@ -412,6 +416,9 @@ final class DesktopUnreadTaskWatcher: @unchecked Sendable {
     func stop() {
         self.queue.sync {
             self.isStopped = true
+            self.claudeExpiryRecount?.cancel()
+            self.claudeExpiryRecount = nil
+            self.claudeRecountScheduledAt = nil
             guard let stream = self.stream else { return }
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
@@ -438,10 +445,8 @@ final class DesktopUnreadTaskWatcher: @unchecked Sendable {
         }
         if let claudeRoot = Self.canonicalPath(self.reader.claudeSupportDirectory) {
             roots.append(claudeRoot)
-            self.claudePrefixes = [
-                claudeRoot + "/Local Storage/leveldb/",
-                claudeRoot + "/claude-code-sessions/",
-            ]
+            self.claudeStoragePrefix = claudeRoot + "/Local Storage/leveldb/"
+            self.claudeSessionsPrefix = claudeRoot + "/claude-code-sessions/"
         }
         guard !roots.isEmpty else { return }
 
@@ -491,29 +496,46 @@ final class DesktopUnreadTaskWatcher: @unchecked Sendable {
                 | kFSEventStreamEventFlagUserDropped
                 | kFSEventStreamEventFlagKernelDropped)
         var changed = Set<TokenPlatform>()
+        var claudeStoreChanged = false
+        var claudeSessionsChanged = false
         for (index, path) in paths.enumerated() {
             if index < flags.count, flags[index] & rescanFlags != 0 {
                 changed.formUnion(DesktopUnreadTaskReader.platforms)
+                claudeStoreChanged = true
+                claudeSessionsChanged = true
                 break
             }
             if self.codexPaths.contains(path) {
                 changed.insert(.codex)
-            } else if self.claudePrefixes.contains(where: { path.hasPrefix($0) }) {
-                changed.insert(.claude)
+            }
+            if let prefix = self.claudeStoragePrefix, path.hasPrefix(prefix) {
+                claudeStoreChanged = true
+            }
+            if let prefix = self.claudeSessionsPrefix, path.hasPrefix(prefix) {
+                claudeSessionsChanged = true
             }
         }
-        self.recount(DesktopUnreadTaskReader.platforms.filter { changed.contains($0) })
+        if claudeStoreChanged || claudeSessionsChanged { changed.insert(.claude) }
+        self.recount(
+            DesktopUnreadTaskReader.platforms.filter { changed.contains($0) },
+            claudeStoreChanged: claudeStoreChanged,
+            claudeSessionsChanged: claudeSessionsChanged)
     }
 
-    private func recount(_ platforms: [TokenPlatform]) {
+    private func recount(
+        _ platforms: [TokenPlatform],
+        claudeStoreChanged: Bool = true,
+        claudeSessionsChanged: Bool = true)
+    {
         guard !self.isStopped else { return }
         for platform in platforms {
             switch platform {
             case .codex:
                 self.publish(.codex, self.reader.codexUnreadCount())
             case .claude:
-                let store = self.reader.claudeUnreadStore()
-                let sessions = self.reader.claudeSessions(reusing: self.claudeTracker.sessions)
+                let store = claudeStoreChanged ? self.reader.claudeUnreadStore() : nil
+                let sessions = claudeSessionsChanged
+                    ? self.reader.claudeSessions(reusing: self.claudeTracker.sessions) : nil
                 let count = self.claudeTracker.update(store: store, sessions: sessions, now: Date())
                 self.publish(.claude, count)
                 self.scheduleClaudeExpiryRecount()
@@ -524,16 +546,21 @@ final class DesktopUnreadTaskWatcher: @unchecked Sendable {
     }
 
     private func scheduleClaudeExpiryRecount() {
-        guard let expiry = self.claudeTracker.nextExpiry,
-              self.claudeRecountScheduledAt.map({ expiry < $0 }) ?? true
-        else {
-            return
-        }
+        let expiry = self.claudeTracker.nextExpiry
+        guard expiry != self.claudeRecountScheduledAt else { return }
+        self.claudeExpiryRecount?.cancel()
+        self.claudeExpiryRecount = nil
         self.claudeRecountScheduledAt = expiry
-        self.queue.asyncAfter(deadline: .now() + max(0, expiry.timeIntervalSinceNow) + 0.1) {
+        guard let expiry else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
             self.claudeRecountScheduledAt = nil
-            self.recount([.claude])
+            self.claudeExpiryRecount = nil
+            // Expiry changes only the inferred state; file events refresh disk inputs.
+            self.recount([.claude], claudeStoreChanged: false, claudeSessionsChanged: false)
         }
+        self.claudeExpiryRecount = work
+        self.queue.asyncAfter(deadline: .now() + max(0, expiry.timeIntervalSinceNow) + 0.1, execute: work)
     }
 
     private static func canonicalPath(_ url: URL) -> String? {

@@ -754,43 +754,12 @@ public struct SynchronizedActivityService: ActivityProviding, Sendable {
                         message: messages.isEmpty ? nil : messages.joined(separator: " ")))
                     return local
                 }
-                let merged = ActivitySnapshotMerger.merge(
+                return await self.acceptSyncResponse(
+                    response,
                     local: local,
-                    localDevice: configuration.device,
-                    remote: response.snapshots)
-                let localDeviceID = configuration.device.id.lowercased()
-                let remoteDeviceIDs = Set(response.snapshots.compactMap { record -> String? in
-                    let deviceID = record.device.id.lowercased()
-                    return deviceID == localDeviceID ? nil : deviceID
-                })
-                let compatibleDeviceIDs = Set(response.snapshots.compactMap { record -> String? in
-                    let deviceID = record.device.id.lowercased()
-                    guard deviceID != localDeviceID,
-                          record.snapshot.timezone == local.timezone
-                    else {
-                        return nil
-                    }
-                    return deviceID
-                })
-                let incompatibleDeviceCount = remoteDeviceIDs
-                    .subtracting(compatibleDeviceIDs).count
-                var messages = [
-                    outcome.uploadErrorDescription,
-                    outcome.downloadErrorDescription,
-                ].compactMap { $0 }.filter { !$0.isEmpty }
-                if incompatibleDeviceCount > 0 {
-                    messages.append(
-                        incompatibleDeviceCount == 1
-                            ? "1 台设备使用了不同的统计时区。"
-                            : "\(incompatibleDeviceCount) 台设备使用了不同的统计时区。")
-                }
-                await self.report(ActivitySyncReport(
-                    phase: messages.isEmpty ? .success : .partial,
+                    configuration: configuration,
                     attemptedAt: attemptedAt,
-                    succeededAt: self.now(),
-                    deviceCount: compatibleDeviceIDs.count + 1,
-                    message: messages.isEmpty ? nil : messages.joined(separator: " ")))
-                return merged
+                    messages: [outcome.uploadErrorDescription, outcome.downloadErrorDescription])
             } catch is CancellationError {
                 await self.report(.ready)
                 return local
@@ -820,41 +789,12 @@ public struct SynchronizedActivityService: ActivityProviding, Sendable {
             guard await self.configuration() == configuration else {
                 return local
             }
-            let merged = ActivitySnapshotMerger.merge(
+            return await self.acceptSyncResponse(
+                response,
                 local: local,
-                localDevice: configuration.device,
-                remote: response.snapshots)
-            let localDeviceID = configuration.device.id.lowercased()
-            let remoteDeviceIDs = Set(response.snapshots.compactMap { record -> String? in
-                let deviceID = record.device.id.lowercased()
-                return deviceID == localDeviceID ? nil : deviceID
-            })
-            let compatibleDeviceIDs = Set(response.snapshots.compactMap { record -> String? in
-                let deviceID = record.device.id.lowercased()
-                guard deviceID != localDeviceID,
-                      record.snapshot.timezone == local.timezone
-                else {
-                    return nil
-                }
-                return deviceID
-            })
-            let incompatibleDeviceCount = remoteDeviceIDs
-                .subtracting(compatibleDeviceIDs).count
-            var messages = [uploadError?.localizedDescription].compactMap { $0 }
-            if incompatibleDeviceCount > 0 {
-                messages.append(
-                    incompatibleDeviceCount == 1
-                        ? "1 台设备使用了不同的统计时区。"
-                        : "\(incompatibleDeviceCount) 台设备使用了不同的统计时区。")
-            }
-            let succeededAt = self.now()
-            await self.report(ActivitySyncReport(
-                phase: messages.isEmpty ? .success : .partial,
+                configuration: configuration,
                 attemptedAt: attemptedAt,
-                succeededAt: succeededAt,
-                deviceCount: compatibleDeviceIDs.count + 1,
-                message: messages.isEmpty ? nil : messages.joined(separator: " ")))
-            return merged
+                messages: [uploadError?.localizedDescription])
         } catch is CancellationError {
             await self.report(.ready)
             return local
@@ -870,6 +810,42 @@ public struct SynchronizedActivityService: ActivityProviding, Sendable {
                 message: messages.joined(separator: " ")))
             return local
         }
+    }
+
+    private func acceptSyncResponse(
+        _ response: ActivitySyncDownloadResponse,
+        local: ActivitySnapshot,
+        configuration: ActivitySyncConfiguration,
+        attemptedAt: Date,
+        messages: [String?]) async -> ActivitySnapshot
+    {
+        let localDeviceID = configuration.device.id.lowercased()
+        var remoteDeviceIDs: Set<String> = []
+        var compatibleDeviceIDs: Set<String> = []
+        for record in response.snapshots {
+            let deviceID = record.device.id.lowercased()
+            guard deviceID != localDeviceID else { continue }
+            remoteDeviceIDs.insert(deviceID)
+            if record.snapshot.timezone == local.timezone {
+                compatibleDeviceIDs.insert(deviceID)
+            }
+        }
+        var messages = messages.compactMap { $0 }.filter { !$0.isEmpty }
+        let incompatibleDeviceCount = remoteDeviceIDs.subtracting(compatibleDeviceIDs).count
+        if incompatibleDeviceCount > 0 {
+            messages.append("\(incompatibleDeviceCount) 台设备使用了不同的统计时区。")
+        }
+        let merged = ActivitySnapshotMerger.merge(
+            local: local,
+            localDevice: configuration.device,
+            remote: response.snapshots)
+        await self.report(ActivitySyncReport(
+            phase: messages.isEmpty ? .success : .partial,
+            attemptedAt: attemptedAt,
+            succeededAt: self.now(),
+            deviceCount: compatibleDeviceIDs.count + 1,
+            message: messages.isEmpty ? nil : messages.joined(separator: " ")))
+        return merged
     }
 }
 

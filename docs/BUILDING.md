@@ -70,7 +70,7 @@ swift test --build-system native \
 cargo test --manifest-path Helper/Cargo.toml --locked
 ```
 
-2026-10-17 本机构建记录：Swift 345 项测试通过；Rust 最近一次完整测试为 161 项通过。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
+2026-10-17 本机结构审查后验证：Swift 358 项测试通过，Rust 161 项测试通过。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
 
 ## 文档配图
 

@@ -307,12 +307,14 @@ public struct ActivityService: ActivityProviding, Sendable {
     {
         var platforms: Set<TokenPlatform> = []
         for session in snapshot.sessions {
-            for request in session.requests.flatMap(\.physicalRequests)
-                where request.costSource == .unknown && request.tokens.total > 0
-            {
-                let platform = request.platform ?? session.platform ?? .codex
-                if platform == .codex || platform == .claude || platform == .antigravity {
-                    platforms.insert(platform)
+            for request in session.requests {
+                for physical in request.physicalRequests
+                    where physical.costSource == .unknown && physical.tokens.total > 0
+                {
+                    let platform = physical.platform ?? session.platform ?? .codex
+                    if platform == .codex || platform == .claude || platform == .antigravity {
+                        platforms.insert(platform)
+                    }
                 }
             }
         }

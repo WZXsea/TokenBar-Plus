@@ -11,7 +11,7 @@ struct DashboardLayoutTests {
         #expect(DashboardSectionContentView.preferredHeight(for: .today, quota: nil) == 113)
         #expect(DashboardSectionContentView.preferredHeight(for: .weeklyReset, quota: nil) == 65)
         let standaloneQuotaHeight = DashboardSectionContentView.preferredHeight(for: .quota, quota: nil)
-        let expectedQuotaHeight = DashboardOverviewView.quotaHeight(quota: nil) + 1
+        let expectedQuotaHeight = DashboardLayout.quotaHeight(quota: nil) + 1
         #expect(abs(Double(standaloneQuotaHeight) - Double(expectedQuotaHeight)) < 0.001)
         for section in [TokenBarDashboardSection.activity, .memory, .recentSessions] {
             #expect(DashboardSectionContentView.preferredHeight(for: section, quota: nil) == 0)
@@ -36,26 +36,26 @@ struct DashboardLayoutTests {
             quota: nil, showsClaude: false, showsGrok: false, showsAntigravity: false, sections: [.speed])
         let speedAndToday = DashboardSummaryView.preferredHeight(
             quota: nil, showsClaude: false, showsGrok: false, showsAntigravity: false, sections: [.today, .speed])
-        #expect(empty == DashboardOverviewView.compactHeaderHeight)
+        #expect(empty == DashboardLayout.compactHeaderHeight)
         #expect(speedOnly - empty == 165)
         #expect(speedAndToday - speedOnly == 113)
     }
 
     @Test("quota height follows the rows returned by the provider")
     func quotaHeightFollowsAvailableRows() {
-        let weeklyOnly = DashboardOverviewView.quotaHeight(
+        let weeklyOnly = DashboardLayout.quotaHeight(
             hasWeekly: true,
             hasFiveHour: false,
             hasResetCredits: false)
-        let weeklyAndFiveHour = DashboardOverviewView.quotaHeight(
+        let weeklyAndFiveHour = DashboardLayout.quotaHeight(
             hasWeekly: true,
             hasFiveHour: true,
             hasResetCredits: false)
-        let weeklyAndResetCredits = DashboardOverviewView.quotaHeight(
+        let weeklyAndResetCredits = DashboardLayout.quotaHeight(
             hasWeekly: true,
             hasFiveHour: false,
             hasResetCredits: true)
-        let allRows = DashboardOverviewView.quotaHeight(
+        let allRows = DashboardLayout.quotaHeight(
             hasWeekly: true,
             hasFiveHour: true,
             hasResetCredits: true)
@@ -71,26 +71,26 @@ struct DashboardLayoutTests {
     @Test("single-platform header omits the selector height")
     func compactSinglePlatformHeader() {
         #expect(
-            DashboardOverviewView.headerHeight(
+            DashboardLayout.headerHeight(
                 showsClaude: false,
                 showsGrok: false,
                 showsAntigravity: false)
-                == DashboardOverviewView.compactHeaderHeight)
+                == DashboardLayout.compactHeaderHeight)
         #expect(
-            DashboardOverviewView.headerHeight(
+            DashboardLayout.headerHeight(
                 showsClaude: false,
                 showsGrok: false,
                 showsAntigravity: false)
-                < DashboardOverviewView.headerHeight(
+                < DashboardLayout.headerHeight(
                     showsClaude: true,
                     showsGrok: false,
                     showsAntigravity: false))
         #expect(
-            DashboardOverviewView.headerHeight(
+            DashboardLayout.headerHeight(
                 showsClaude: false,
                 showsGrok: false,
                 showsAntigravity: false)
-                < DashboardOverviewView.headerHeight(
+                < DashboardLayout.headerHeight(
                     showsClaude: false,
                     showsGrok: false,
                     showsAntigravity: true))

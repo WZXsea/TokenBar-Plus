@@ -272,7 +272,7 @@ struct TokenBarSettingsView: View {
                     }
                 }
 
-                Text("控制本地用量刷新；每轮完成后等待所选间隔。额度自动查询最短间隔为 60 秒。")
+                Text("会话活跃时，每轮完成后等待所选间隔。会话静止 60 秒后，刷新间隔至少为 5 分钟；检测到新的会话记录时立即恢复。额度自动查询最短间隔为 60 秒。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

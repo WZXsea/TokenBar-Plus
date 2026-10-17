@@ -7,6 +7,7 @@ import TokenBarCore
 final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenuPersistentActionDelegate {
     private static let menuWidth: CGFloat = 384
     private static let requestDetailCacheLimit = 64
+    private static let sessionHistoryCacheLimit = 16
 
     private struct RenderedSessionProjection: Equatable {
         let ids: [String]
@@ -50,6 +51,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private let requestDetailService: any RequestDetailProviding
     private let sessionLauncher: SessionLauncher
     private let unreadTasks: DesktopUnreadTaskMonitor
+    private var activityFileWatcher: ActivityFileWatcher?
     private let showSettingsAction: () -> Void
     private let statusItem: NSStatusItem
     private let rootMenu = TokenBarMenu()
@@ -58,7 +60,6 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private var nextMenuScopeOverride: DashboardScope?
     private var sessionItems: [NSMenuItem] = []
     private var renderedSessionProjection: RenderedSessionProjection?
-    private var renderedSessions: [SessionSummary] = []
     private var renderedMenuScope: DashboardScope?
     private var submenuSessions: [ObjectIdentifier: SessionSummary] = [:]
     private var requestDetailMenus: [ObjectIdentifier: RequestDetailMenuContext] = [:]
@@ -71,13 +72,13 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private var activitySessionMenu: TokenBarMenu?
     private var activitySessionItems: [NSMenuItem] = []
     private var renderedActivitySessionProjection: RenderedSessionProjection?
-    private var renderedActivitySessions: [SessionSummary] = []
     private var activitySessionExpansionItem: NSMenuItem?
     private var activitySessionExpansionView: PersistentMenuActionRowView?
     private var activitySessionEmptyItem: NSMenuItem?
     private var selectedSessionDate: String?
     private var sessionHistory: [SessionHistoryKey: [SessionSummary]] = [:]
     private var sessionHistoryErrors: [SessionHistoryKey: String] = [:]
+    private var sessionHistoryOrder: [SessionHistoryKey] = []
     private var loadingSessionHistoryKey: SessionHistoryKey?
     private var sessionHistoryTask: Task<Void, Never>?
     private var memoryItem: NSMenuItem?
@@ -143,6 +144,15 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     func start() {
+        if self.activityFileWatcher == nil {
+            let watcher = ActivityFileWatcher { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.model.notifyActivityChanged()
+                }
+            }
+            self.activityFileWatcher = watcher
+            watcher.start()
+        }
         self.unreadTasks.start()
         self.startupTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -161,11 +171,12 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     func tearDown() {
+        self.activityFileWatcher?.stop()
+        self.activityFileWatcher = nil
         self.unreadTasks.stop()
         self.startupTask?.cancel()
         self.startupTask = nil
-        self.sessionHistoryTask?.cancel()
-        self.sessionHistoryTask = nil
+        self.cancelSessionHistoryLoad()
         self.removeShortcutMonitor()
         self.discardRequestDetailMenus(in: self.rootMenu)
         self.rootMenu.delegate = nil
@@ -551,7 +562,6 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.rootMenu.removeAllItems()
         self.sessionItems.removeAll()
         self.renderedSessionProjection = nil
-        self.renderedSessions.removeAll()
         self.renderedMenuScope = nil
         self.sessionExpansionItem = nil
         self.sessionEmptyItem = nil
@@ -559,7 +569,6 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.activitySessionMenu = nil
         self.activitySessionItems.removeAll()
         self.renderedActivitySessionProjection = nil
-        self.renderedActivitySessions.removeAll()
         self.activitySessionExpansionItem = nil
         self.activitySessionExpansionView = nil
         self.activitySessionEmptyItem = nil
@@ -572,7 +581,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.submenuSessions.removeAll()
 
         let accentColor = self.settings.theme.color
-        let headerHeight = DashboardOverviewView.headerHeight(
+        let headerHeight = DashboardLayout.headerHeight(
             showsClaude: self.settings.showsClaude,
             showsGrok: self.settings.showsGrok,
             showsAntigravity: self.settings.showsAntigravity)
@@ -1137,23 +1146,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 }
             }
         }
-        let sessionsChanged = self.renderedSessions != visibleSessions
-
-        for (index, item) in self.sessionItems.enumerated() {
-            if sessionsChanged, index < visibleSessions.count {
-                let session = visibleSessions[index]
-                self.configureSessionItem(item, session: session)
-                self.bindSessionSubmenu(item, to: session)
-            } else if sessionsChanged {
-                item.representedObject = nil
-                self.unbindSessionSubmenu(item)
-            }
-            let isHidden = index >= visibleSessions.count
-            if item.isHidden != isHidden {
-                item.isHidden = isHidden
-            }
-        }
-        self.renderedSessions = visibleSessions
+        self.updateSessionRows(self.sessionItems, sessions: visibleSessions)
 
         let hasSessions = !projection.ids.isEmpty
         let emptyTitle = "今日 \(scope.displayName) 会话待生成"
@@ -1258,24 +1251,10 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             ids: visibleSessions.map(\.platformScopedID),
             collapsedLimit: self.settings.recentSessionLimit)
         self.renderedActivitySessionProjection = projection
-        let sessionsChanged = self.renderedActivitySessions != visibleSessions
-
-        for (index, item) in self.activitySessionItems.enumerated() {
-            if sessionsChanged, index < visibleSessions.count {
-                let session = visibleSessions[index]
-                self.configureSessionItem(item, session: session)
-                self.bindSessionSubmenu(item, to: session)
-            } else if sessionsChanged {
-                item.representedObject = nil
-                self.unbindSessionSubmenu(item)
-            }
-            let isHidden = index >= visibleSessions.count
-                || (!self.showsAllActivitySessions && index >= projection.collapsedLimit)
-            if item.isHidden != isHidden {
-                item.isHidden = isHidden
-            }
-        }
-        self.renderedActivitySessions = visibleSessions
+        self.updateSessionRows(
+            self.activitySessionItems,
+            sessions: visibleSessions,
+            visibleLimit: self.showsAllActivitySessions ? nil : projection.collapsedLimit)
 
         self.activitySessionMenu?.title = self.activitySessionHeaderTitle
         let hasSessions = !projection.ids.isEmpty
@@ -1300,6 +1279,30 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             title: title,
             systemImageName: self.showsAllActivitySessions ? "chevron.up" : "chevron.down",
             accessibilityHelp: "在当前菜单中展开或收起所选日期的会话。")
+    }
+
+    /// Reconfigure only the rows whose session changed; quota updates also reach this path.
+    private func updateSessionRows(
+        _ items: [NSMenuItem],
+        sessions: [SessionSummary],
+        visibleLimit: Int? = nil)
+    {
+        for (index, item) in items.enumerated() {
+            let session = index < sessions.count ? sessions[index] : nil
+            if (item.representedObject as? SessionSummary) != session {
+                if let session {
+                    self.configureSessionItem(item, session: session)
+                    self.bindSessionSubmenu(item, to: session)
+                } else {
+                    item.representedObject = nil
+                    self.unbindSessionSubmenu(item)
+                }
+            }
+            let isHidden = index >= min(sessions.count, visibleLimit ?? sessions.count)
+            if item.isHidden != isHidden {
+                item.isHidden = isHidden
+            }
+        }
     }
 
     private func ensureSessionItemCapacity(_ count: Int) {
@@ -1336,9 +1339,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         guard self.availableSessionDates.contains(date) else { return }
         let didChange = self.selectedSessionDate != date
         if didChange {
-            self.sessionHistoryTask?.cancel()
-            self.sessionHistoryTask = nil
-            self.loadingSessionHistoryKey = nil
+            self.cancelSessionHistoryLoad()
             self.selectedSessionDate = date
             self.showsAllActivitySessions = false
         }
@@ -1356,18 +1357,15 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
               selectedSessionDate != self.latestSessionDate,
               let key = self.selectedSessionHistoryKey
         else {
-            self.sessionHistoryTask?.cancel()
-            self.sessionHistoryTask = nil
-            self.loadingSessionHistoryKey = nil
+            self.cancelSessionHistoryLoad()
             self.updateActivitySessionProjectionAndVisibility()
             return
         }
         if force {
-            self.sessionHistoryTask?.cancel()
-            self.sessionHistoryTask = nil
-            self.loadingSessionHistoryKey = nil
+            self.cancelSessionHistoryLoad()
             self.sessionHistory.removeValue(forKey: key)
         } else if self.sessionHistory[key] != nil {
+            self.touchSessionHistory(key)
             return
         }
         guard self.loadingSessionHistoryKey != key else { return }
@@ -1393,18 +1391,34 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 self.sessionHistoryErrors[key] = error.localizedDescription
             }
             guard !Task.isCancelled, self.loadingSessionHistoryKey == key else { return }
+            self.touchSessionHistory(key)
             self.loadingSessionHistoryKey = nil
             self.sessionHistoryTask = nil
             self.updateActivitySessionProjectionAndVisibility()
         }
     }
 
-    private func resetSessionHistory() {
+    private func cancelSessionHistoryLoad() {
         self.sessionHistoryTask?.cancel()
         self.sessionHistoryTask = nil
         self.loadingSessionHistoryKey = nil
+    }
+
+    private func touchSessionHistory(_ key: SessionHistoryKey) {
+        self.sessionHistoryOrder.removeAll { $0 == key }
+        self.sessionHistoryOrder.append(key)
+        while self.sessionHistoryOrder.count > Self.sessionHistoryCacheLimit {
+            let expired = self.sessionHistoryOrder.removeFirst()
+            self.sessionHistory.removeValue(forKey: expired)
+            self.sessionHistoryErrors.removeValue(forKey: expired)
+        }
+    }
+
+    private func resetSessionHistory() {
+        self.cancelSessionHistoryLoad()
         self.sessionHistory.removeAll()
         self.sessionHistoryErrors.removeAll()
+        self.sessionHistoryOrder.removeAll()
     }
 
     #if DEBUG
@@ -1446,7 +1460,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     func renderedActivitySessionIDsForTesting() -> [String] {
-        self.renderedActivitySessions.map(\.platformScopedID)
+        self.activitySessionItems.compactMap { ($0.representedObject as? SessionSummary)?.platformScopedID }
     }
 
     func activitySessionMenuForTesting() -> NSMenu? {
@@ -1465,6 +1479,10 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
 
     func firstActivitySessionSubmenuForTesting() -> NSMenu? {
         self.activitySessionItems.first?.submenu
+    }
+
+    func cachedSessionHistoryDatesForTesting() -> [String] {
+        self.sessionHistoryOrder.map(\.date)
     }
 
     func isLoadingSessionHistoryForTesting() -> Bool {

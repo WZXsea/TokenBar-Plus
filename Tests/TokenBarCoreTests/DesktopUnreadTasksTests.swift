@@ -115,6 +115,31 @@ struct DesktopUnreadTasksTests {
         #expect(tracker.update(store: ["b", "archived"], sessions: sessions, now: start.addingTimeInterval(141)) == 1)
     }
 
+    @Test("Claude reuses unchanged inputs and expires inferred unread state from memory")
+    func claudePartialUpdates() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        func session(turns: Int, focus: Int64, modified: TimeInterval = 0) -> ClaudeSessionSnapshot {
+            ClaudeSessionSnapshot(
+                completedTurns: turns,
+                lastFocusedAt: focus,
+                isArchived: false,
+                modifiedAt: start.addingTimeInterval(modified))
+        }
+        var tracker = ClaudeUnreadTracker()
+        let initial = ["a": session(turns: 1, focus: 1), "b": session(turns: 1, focus: 2)]
+        #expect(tracker.update(store: [], sessions: initial, now: start) == 0)
+        #expect(tracker.update(
+            sessions: ["a": session(turns: 2, focus: 1, modified: 10), "b": initial["b"]!],
+            now: start.addingTimeInterval(11)) == 1)
+        #expect(tracker.nextExpiry == start.addingTimeInterval(100))
+        #expect(tracker.update(now: start.addingTimeInterval(101)) == 0)
+        #expect(tracker.nextExpiry == nil)
+        #expect(tracker.update(store: ["a"], now: start.addingTimeInterval(102)) == 1)
+        #expect(tracker.sessions["a"]?.completedTurns == 2)
+        // An empty supplied store replaces the cached set as soon as it commits.
+        #expect(tracker.update(store: [], now: start.addingTimeInterval(103)) == 0)
+    }
+
     private static func makeDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("TokenBarUnreadTasks-\(UUID().uuidString)", isDirectory: true)

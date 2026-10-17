@@ -101,6 +101,52 @@ struct RecentSessionMenuTests {
         #expect(menu.items.filter { !$0.isHidden }.allSatisfy { !$0.title.hasPrefix("更多会话") })
     }
 
+    @Test("Refreshing one session preserves the other session's populated turn submenu")
+    func refreshingOneSessionPreservesUnchangedSubmenu() async throws {
+        let harness = try await CompactSessionHarness.make(codexCount: 2)
+        defer { harness.tearDown() }
+        let menu = harness.controller.rootMenuForTesting()
+        harness.controller.menuWillOpen(menu)
+        defer { harness.controller.menuDidClose(menu) }
+        await harness.model.refreshActivity()
+
+        let unchangedItem = try #require(menu.items.first {
+            ($0.representedObject as? SessionSummary)?.id == "codex-1"
+        })
+        let unchangedRow = try #require(unchangedItem.view)
+        let populatedSubmenu = try #require(unchangedItem.submenu)
+        harness.controller.menuNeedsUpdate(populatedSubmenu)
+        let populatedItems = populatedSubmenu.items
+        #expect(populatedItems.contains { $0.title == "轮次" })
+        #expect(populatedItems.contains { $0.title == "复制会话" })
+
+        var sessions = CompactSessionHarness.sessions(count: 2, platform: .codex)
+        let original = sessions[1]
+        sessions[1] = SessionSummary(
+            id: original.id, workspaceLabel: original.workspaceLabel,
+            startedAtMs: original.startedAtMs, endedAtMs: original.endedAtMs,
+            tokens: original.tokens, costUsd: original.costUsd, models: original.models,
+            requests: original.requests, title: "Updated conversation", platform: original.platform)
+        await harness.provider.replaceSessions(sessions)
+        await harness.model.refreshActivity()
+        try await Self.waitUntil {
+            menu.items.contains {
+                ($0.representedObject as? SessionSummary)?.title == "Updated conversation"
+                    && $0.submenu?.title == "Updated conversation"
+            }
+        }
+
+        let preservedItem = try #require(menu.items.first {
+            ($0.representedObject as? SessionSummary)?.id == "codex-1"
+        })
+        #expect(preservedItem === unchangedItem)
+        #expect(preservedItem.view === unchangedRow)
+        #expect(preservedItem.submenu === populatedSubmenu)
+        #expect(populatedSubmenu.items.count == populatedItems.count)
+        #expect(zip(populatedSubmenu.items, populatedItems).allSatisfy { $0.0 === $0.1 })
+        #expect(Self.visibleSessionIDs(in: menu) == ["codex-2", "codex-1"])
+    }
+
     private static func visibleSessionIDs(in menu: NSMenu) -> [String] {
         menu.items.filter { !$0.isHidden }.compactMap { ($0.representedObject as? SessionSummary)?.id }
     }
