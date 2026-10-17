@@ -1,6 +1,8 @@
 import Foundation
 
 public protocol ActivityProviding: Sendable {
+    func fetchHistory(days: Int, endDate: String, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot
+
     func fetchActivity(
         sinceWeeklyResetAt: Date?,
         statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot
@@ -15,6 +17,10 @@ public protocol ActivityProviding: Sendable {
 }
 
 public extension ActivityProviding {
+    func fetchHistory(days: Int, endDate: String, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot {
+        throw ActivityServiceError.historyUnavailable
+    }
+
     func fetchActivity() async throws -> ActivitySnapshot {
         try await self.fetchActivity(
             sinceWeeklyResetAt: nil,
@@ -76,18 +82,21 @@ public struct SubprocessActivityHelperRunner: ActivityHelperRunning, Sendable {
 
 public enum ActivityServiceError: LocalizedError, Sendable {
     case helperNotFound([String])
+    case historyUnavailable
     case emptyOutput
     case invalidOutput(String)
 
     public var errorDescription: String? {
         switch self {
         case let .helperNotFound(paths):
-            let searched = paths.isEmpty ? "no candidate paths" : paths.joined(separator: ", ")
-            return "tokenbar-helper was not found (searched: \(searched))."
+            let searched = paths.isEmpty ? "候选路径为空" : paths.joined(separator: ", ")
+            return "tokenbar-helper 定位失败（已搜索：\(searched)）。"
+        case .historyUnavailable:
+            return "此数据源尚未提供完整历史记录。"
         case .emptyOutput:
-            return "tokenbar-helper returned no activity data."
+            return "tokenbar-helper 返回的使用记录为空。"
         case let .invalidOutput(message):
-            return "tokenbar-helper returned invalid JSON: \(message)"
+            return "tokenbar-helper 返回的 JSON 无效：\(message)"
         }
     }
 }
@@ -99,6 +108,7 @@ public struct ActivityService: ActivityProviding, Sendable {
     private let environment: [String: String]
     private let timeout: TimeInterval
     private let memoryDatabaseURLProvider: @Sendable () async -> URL?
+    private let customPricingURLProvider: @Sendable () async -> URL?
     private let openAIPricingCatalog: (any OpenAIPricingCatalogUpdating)?
     private let anthropicPricingCatalog: (any AnthropicPricingCatalogUpdating)?
     private let openRouterPricingCatalog: (any OpenRouterPricingCatalogUpdating)?
@@ -110,6 +120,7 @@ public struct ActivityService: ActivityProviding, Sendable {
         arguments: [String] = [],
         memoryDatabaseURL: URL? = nil,
         memoryDatabaseURLProvider: (@Sendable () async -> URL?)? = nil,
+        customPricingURLProvider: (@Sendable () async -> URL?)? = nil,
         openAIPricingCatalog: (any OpenAIPricingCatalogUpdating)? = nil,
         anthropicPricingCatalog: (any AnthropicPricingCatalogUpdating)? = nil,
         openRouterPricingCatalog: (any OpenRouterPricingCatalogUpdating)? = nil,
@@ -119,6 +130,7 @@ public struct ActivityService: ActivityProviding, Sendable {
     {
         self.arguments = arguments
         self.memoryDatabaseURLProvider = memoryDatabaseURLProvider ?? { memoryDatabaseURL }
+        self.customPricingURLProvider = customPricingURLProvider ?? { nil }
         self.openAIPricingCatalog = openAIPricingCatalog
         self.anthropicPricingCatalog = anthropicPricingCatalog
         self.openRouterPricingCatalog = openRouterPricingCatalog
@@ -134,6 +146,7 @@ public struct ActivityService: ActivityProviding, Sendable {
         arguments: [String] = [],
         memoryDatabaseURL: URL? = nil,
         memoryDatabaseURLProvider: (@Sendable () async -> URL?)? = nil,
+        customPricingURLProvider: (@Sendable () async -> URL?)? = nil,
         openAIPricingCatalog: (any OpenAIPricingCatalogUpdating)? = nil,
         anthropicPricingCatalog: (any AnthropicPricingCatalogUpdating)? = nil,
         openRouterPricingCatalog: (any OpenRouterPricingCatalogUpdating)? = nil,
@@ -144,6 +157,7 @@ public struct ActivityService: ActivityProviding, Sendable {
     {
         self.arguments = arguments
         self.memoryDatabaseURLProvider = memoryDatabaseURLProvider ?? { memoryDatabaseURL }
+        self.customPricingURLProvider = customPricingURLProvider ?? { nil }
         self.openAIPricingCatalog = openAIPricingCatalog
         self.anthropicPricingCatalog = anthropicPricingCatalog
         self.openRouterPricingCatalog = openRouterPricingCatalog
@@ -178,6 +192,15 @@ public struct ActivityService: ActivityProviding, Sendable {
             statisticsTimeZone: statisticsTimeZone)
     }
 
+    public func fetchHistory(days: Int, endDate: String, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot {
+        try await self.fetchSnapshot(
+            helperURL: self.resolveHelper(),
+            sinceWeeklyResetAtByPlatform: [:],
+            memoryDatabaseURL: nil,
+            snapshotArguments: ["--days", String(min(366, max(1, days))), "--end-date", endDate],
+            statisticsTimeZone: statisticsTimeZone)
+    }
+
     public func fetchSessions(
         on date: String,
         statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> [SessionSummary]
@@ -203,6 +226,7 @@ public struct ActivityService: ActivityProviding, Sendable {
         async let anthropicPricingURL = self.anthropicPricingCatalog?.refreshIfNeeded()
         async let openRouterPricingURL = self.openRouterPricingCatalog?.refreshIfNeeded()
         let pricingURLs = await (openAIPricingURL, anthropicPricingURL, openRouterPricingURL)
+        let customPricingURL = await self.customPricingURLProvider()
         let initial = try await self.runSnapshot(
             helperURL: helperURL,
             sinceWeeklyResetAtByPlatform: sinceWeeklyResetAtByPlatform,
@@ -210,6 +234,7 @@ public struct ActivityService: ActivityProviding, Sendable {
             openAIPricingURL: pricingURLs.0,
             anthropicPricingURL: pricingURLs.1,
             openRouterPricingURL: pricingURLs.2,
+            customPricingURL: customPricingURL,
             snapshotArguments: snapshotArguments,
             statisticsTimeZone: statisticsTimeZone)
 
@@ -240,6 +265,7 @@ public struct ActivityService: ActivityProviding, Sendable {
             openAIPricingURL: refreshedURLs.0 ?? pricingURLs.0,
             anthropicPricingURL: refreshedURLs.1 ?? pricingURLs.1,
             openRouterPricingURL: refreshedURLs.2 ?? pricingURLs.2,
+            customPricingURL: customPricingURL,
             snapshotArguments: snapshotArguments,
             statisticsTimeZone: statisticsTimeZone)) ?? initial
     }
@@ -251,6 +277,7 @@ public struct ActivityService: ActivityProviding, Sendable {
         openAIPricingURL: URL?,
         anthropicPricingURL: URL?,
         openRouterPricingURL: URL?,
+        customPricingURL: URL?,
         snapshotArguments: [String],
         statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot
     {
@@ -262,6 +289,7 @@ public struct ActivityService: ActivityProviding, Sendable {
                 openAIPricingURL: openAIPricingURL,
                 anthropicPricingURL: anthropicPricingURL,
                 openRouterPricingURL: openRouterPricingURL,
+                customPricingURL: customPricingURL,
                 snapshotArguments: snapshotArguments,
                 statisticsTimeZone: statisticsTimeZone),
             environment: self.helperEnvironment(statisticsTimeZone: statisticsTimeZone),
@@ -297,6 +325,7 @@ public struct ActivityService: ActivityProviding, Sendable {
         openAIPricingURL: URL?,
         anthropicPricingURL: URL?,
         openRouterPricingURL: URL?,
+        customPricingURL: URL?,
         snapshotArguments: [String],
         statisticsTimeZone: TokenBarStatisticsTimeZone) -> [String]
     {
@@ -326,6 +355,9 @@ public struct ActivityService: ActivityProviding, Sendable {
         }
         if let openRouterPricingURL {
             arguments += ["--openrouter-pricing-json", openRouterPricingURL.path]
+        }
+        if let customPricingURL {
+            arguments += ["--custom-pricing-json", customPricingURL.path]
         }
         return arguments
     }

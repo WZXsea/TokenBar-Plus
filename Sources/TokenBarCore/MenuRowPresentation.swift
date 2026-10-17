@@ -93,12 +93,12 @@ public extension RequestSummary {
             return prompt ?? self.menuTitle
         }
 
-        let actor = self.agent?.compactMenuText ?? "Subagent"
+        let actor = self.agent?.compactMenuText ?? "子智能体"
         if let prompt {
             return "↳ \(actor) · \(prompt)"
         }
         if let output = self.outputPreview?.compactMenuText {
-            return "↳ \(actor) · Output · \(output)"
+            return "↳ \(actor) · 输出 · \(output)"
         }
         return "↳ \(actor)"
     }
@@ -114,8 +114,8 @@ public extension RequestSummary {
     }
 
     var agentRequestMenuTitle: String {
-        guard self.isSubagent else { return "Main" }
-        return self.agent?.compactMenuText ?? "Subagent"
+        guard self.isSubagent else { return "主智能体" }
+        return self.agent?.compactMenuText ?? "子智能体"
     }
 
     var menuCostText: String? {
@@ -281,8 +281,8 @@ private func weightedAverageGenerationTokensPerSecond(
 private extension ActivityServiceTier {
     var menuBadge: String? {
         switch self {
-        case .fast: "FAST"
-        case .mixed: "MIXED"
+        case .fast: "快速"
+        case .mixed: "混合"
         case .unknown, .standard: nil
         }
     }

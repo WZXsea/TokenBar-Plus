@@ -134,6 +134,54 @@ struct SnapshotCacheTests {
         #expect(loaded[.grok]?.weekly?.windowMinutes == 10_080)
     }
 
+    @Test("loads legacy reset-credit summaries without replacing their saved availability")
+    func loadsLegacyResetCreditSummary() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TokenBarLegacyResetCreditTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent("quotas.json")
+        try Data(
+            """
+            {"snapshots":[{"platform":"codex","snapshot":{"updatedAt":1000,"resetCredits":{"availableCount":3,"nextExpiresAt":2000}}}]}
+            """.utf8).write(to: fileURL)
+
+        let loaded = try await QuotaSnapshotCache(fileURL: fileURL).loadQuotas()
+        let credits = try #require(loaded[.codex]?.resetCredits)
+
+        #expect(credits.availableCount == 3)
+        #expect(credits.nextExpiresAt == Date(timeIntervalSinceReferenceDate: 2000))
+        #expect(credits.credits.isEmpty)
+        #expect(credits.serverAvailableCount == nil)
+    }
+
+    @Test("persists complete reset-credit details alongside effective and server totals")
+    func persistsResetCreditDetails() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TokenBarResetCreditCacheTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("quotas.json")
+        let cache = QuotaSnapshotCache(fileURL: fileURL)
+        let now = Date(timeIntervalSinceReferenceDate: 1000)
+        let credits = QuotaResetCreditsSnapshot(
+            availableCount: 1,
+            nextExpiresAt: now.addingTimeInterval(100),
+            credits: [
+                QuotaResetCredit(status: "redeemed", expiresAt: nil),
+                QuotaResetCredit(status: "available", expiresAt: now.addingTimeInterval(-100)),
+                QuotaResetCredit(status: "available", expiresAt: now.addingTimeInterval(100)),
+                QuotaResetCredit(status: "future-status", expiresAt: nil),
+            ],
+            serverAvailableCount: 2)
+        let quota = QuotaSnapshot(session: nil, weekly: nil, resetCredits: credits, updatedAt: now)
+
+        try await cache.saveQuotas([.codex: quota])
+        let loaded = try await cache.loadQuotas()
+
+        #expect(loaded[.codex] == quota)
+        #expect(loaded[.codex]?.resetCredits?.credits == credits.credits)
+    }
+
     @Test("persists weekly quota usage ledgers")
     func persistsWeeklyQuotaUsage() async throws {
         let directory = FileManager.default.temporaryDirectory

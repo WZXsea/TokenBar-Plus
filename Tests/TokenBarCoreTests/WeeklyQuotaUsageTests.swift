@@ -97,6 +97,112 @@ struct WeeklyQuotaUsageTests {
             statisticsTimeZone: .utc)?.isPartial == true)
     }
 
+    @Test("small reset timestamp drift preserves the cycle and observed daily usage")
+    func preservesCycleAcrossResetTimestampDrift() throws {
+        let first = self.snapshot(usedPercent: 30, offset: 86_400)
+        let history = try #require(WeeklyQuotaUsageHistory.starting(with: first))
+            .recording(self.snapshot(usedPercent: 51, offset: 86_700))
+            .recording(self.snapshot(
+                usedPercent: 51,
+                offset: 86_800,
+                windowStart: self.windowStart.addingTimeInterval(2)))
+            .recording(self.snapshot(
+                usedPercent: 52,
+                offset: 86_900,
+                windowStart: self.windowStart.addingTimeInterval(-3)))
+
+        #expect(history.baselines.count == 1)
+        #expect(history.increments.map(\.usedPercentagePoints) == [21, 1])
+        #expect(history.highWaterUsedPercent == 52)
+        #expect(history.usage(on: "2026-08-18", statisticsTimeZone: .utc)?.usedPercentagePoints == 22)
+        #expect(history.validated() != nil)
+    }
+
+    @Test("drift just past the original baseline remains valid after persistence")
+    func baselineNearShiftedWindowStartStaysValid() throws {
+        let history = try #require(WeeklyQuotaUsageHistory.starting(with: self.snapshot(
+            usedPercent: 0,
+            offset: 1)))
+            .recording(self.snapshot(usedPercent: 1, offset: 100))
+            .recording(self.snapshot(
+                usedPercent: 2,
+                offset: 200,
+                windowStart: self.windowStart.addingTimeInterval(2)))
+        let restored = try JSONDecoder().decode(
+            WeeklyQuotaUsageHistory.self,
+            from: JSONEncoder().encode(history))
+
+        #expect(restored.baselines.count == 1)
+        #expect(restored.validated() != nil)
+        #expect(restored.increments.map(\.usedPercentagePoints) == [1, 1])
+    }
+
+    @Test("quota corrections during timestamp drift retain the high water mark")
+    func ignoresCorrectionsAcrossTimestampDrift() throws {
+        let history = try #require(WeeklyQuotaUsageHistory.starting(with: self.snapshot(
+            usedPercent: 40,
+            offset: 86_400)))
+            .recording(self.snapshot(
+                usedPercent: 38,
+                offset: 86_500,
+                windowStart: self.windowStart.addingTimeInterval(60)))
+            .recording(self.snapshot(
+                usedPercent: 41,
+                offset: 86_800,
+                windowStart: self.windowStart.addingTimeInterval(-60)))
+
+        #expect(history.baselines.count == 1)
+        #expect(history.increments.map(\.usedPercentagePoints) == [1])
+        #expect(history.highWaterUsedPercent == 41)
+    }
+
+    @Test("an early real reset starts a new baseline")
+    func earlyResetCreatesBaseline() throws {
+        let history = try #require(WeeklyQuotaUsageHistory.starting(with: self.snapshot(
+            usedPercent: 40,
+            offset: 86_400)))
+            .recording(self.snapshot(usedPercent: 50, offset: 86_500))
+        let reset = history.recording(self.snapshot(
+            usedPercent: 2,
+            offset: 60,
+            windowStart: self.windowStart.addingTimeInterval(86_600)))
+
+        #expect(reset.baselines.map(\.usedPercent) == [40, 2])
+        #expect(reset.highWaterUsedPercent == 2)
+        #expect(reset.increments.map(\.usedPercentagePoints) == [10])
+        #expect(reset.validated() != nil)
+    }
+
+    @Test("a reset just after tracking began is distinct from timestamp drift")
+    func nearbyResetAfterPreviousSampleCreatesBaseline() throws {
+        let history = try #require(WeeklyQuotaUsageHistory.starting(with: self.snapshot(
+            usedPercent: 40,
+            offset: 60)))
+        let reset = history.recording(self.snapshot(
+            usedPercent: 0,
+            offset: 30,
+            windowStart: self.windowStart.addingTimeInterval(90)))
+
+        #expect(reset.baselines.map(\.usedPercent) == [40, 0])
+        #expect(reset.highWaterUsedPercent == 0)
+        #expect(reset.validated() != nil)
+    }
+
+    @Test("the natural boundary starts a new cycle even with the same quota level")
+    func naturalResetAtSameUsageCreatesBaseline() throws {
+        let history = try #require(WeeklyQuotaUsageHistory.starting(with: self.snapshot(
+            usedPercent: 5,
+            offset: 7 * 86_400 - 60)))
+        let reset = history.recording(self.snapshot(
+            usedPercent: 5,
+            offset: 60,
+            windowStart: self.windowStart.addingTimeInterval(7 * 86_400)))
+
+        #expect(reset.baselines.count == 2)
+        #expect(reset.highWaterUsedPercent == 5)
+        #expect(reset.increments.isEmpty)
+    }
+
     @Test("requires a current weekly window")
     func requiresWeeklyWindow() {
         let snapshot = QuotaSnapshot(

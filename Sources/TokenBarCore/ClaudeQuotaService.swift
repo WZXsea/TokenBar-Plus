@@ -7,9 +7,9 @@ public enum ClaudeQuotaServiceError: LocalizedError, Sendable, Equatable {
     public var errorDescription: String? {
         switch self {
         case .localUsageUnavailable:
-            "Claude quota is unavailable. Use Claude Code or open Claude Desktop to refresh local usage."
+            "Claude 额度暂不可用。请使用 Claude Code 或打开 Claude Desktop 以刷新本地用量。"
         case .invalidResponse:
-            "Claude returned invalid quota data."
+            "Claude 返回的额度数据无效。"
         }
     }
 }

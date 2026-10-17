@@ -13,6 +13,7 @@ use crate::usage::{
 pub mod antigravity;
 pub mod codex;
 pub mod claude;
+pub mod custom_pricing;
 pub mod grok;
 pub mod memory;
 pub mod pricing;
@@ -241,6 +242,14 @@ pub struct DailySummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ObservedPricingModel {
+    pub platform: String,
+    #[serde(rename = "modelID")]
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActivitySnapshot {
     pub schema_version: u32,
     pub generated_at_ms: i64,
@@ -258,6 +267,8 @@ pub struct ActivitySnapshot {
     pub memory_usage: Option<memory::MemoryUsageSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing_catalog: Option<openrouter::CatalogStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pricing_models: Vec<ObservedPricingModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -416,43 +427,146 @@ fn extract_request_detail_from_reader<R: BufRead>(
     start_ms: i64,
     end_ms: i64,
 ) -> Result<RequestDetail, String> {
-    let mut prompts = Vec::new();
-    let mut outputs = Vec::new();
+    let mut messages: Vec<CodexDetailMessage> = Vec::new();
 
     for line in reader.lines() {
         let line = line.map_err(|error| format!("could not read Codex session: {error}"))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let Ok(entry) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        let Ok(entry) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
             continue;
         };
         let Some(timestamp_ms) = codex_entry_timestamp_ms(&entry) else {
             continue;
         };
-        if timestamp_ms > end_ms {
-            break;
+        // Rollouts can contain delayed writes with earlier timestamps. Scan the
+        // complete transcript, while keeping the request's inclusive boundary.
+        if timestamp_ms < start_ms || timestamp_ms > end_ms {
+            continue;
         }
-        if timestamp_ms < start_ms {
+        let Some(mut message) = codex_detail_message(&entry, timestamp_ms) else {
+            continue;
+        };
+        if message.text.trim().is_empty()
+            || (message.is_user && !codex_message_is_human_turn(&message.text))
+        {
             continue;
         }
 
-        if let Some(message) = codex_event_message(&entry, "user_message") {
-            if !message.trim().is_empty() && codex_message_is_human_turn(message) {
-                prompts.push(message.to_string());
-            }
-        } else if let Some(message) = codex_event_message(&entry, "agent_message") {
-            if !message.trim().is_empty() {
-                outputs.push(message.to_string());
-            }
+        // Codex commonly writes the same message as both an event and a
+        // response item. Match each mirror once, rather than globally deduping
+        // text: identical messages sent again remain separate transcript items.
+        let mirror = messages
+            .iter_mut()
+            .rev()
+            .take_while(|previous| {
+                previous.is_user == message.is_user && previous.text == message.text
+            })
+            .find(|previous| {
+                !previous.mirrored
+                    && previous.is_response_item != message.is_response_item
+                    && previous.timestamp_ms.abs_diff(message.timestamp_ms) <= 1_000
+                    && (previous.phase.is_none()
+                        || message.phase.is_none()
+                        || previous.phase == message.phase)
+            });
+        if let Some(previous) = mirror {
+            previous.mirrored = true;
+            continue;
         }
+        message.mirrored = false;
+        messages.push(message);
     }
 
+    let join_role = |is_user| {
+        let texts: Vec<&str> = messages
+            .iter()
+            .filter(|message| message.is_user == is_user)
+            .map(|message| message.text.as_str())
+            .collect();
+        (!texts.is_empty()).then(|| texts.join("\n\n"))
+    };
     Ok(RequestDetail {
-        prompt: (!prompts.is_empty()).then(|| prompts.join("\n\n")),
-        output: (!outputs.is_empty()).then(|| outputs.join("\n\n")),
+        prompt: join_role(true),
+        output: join_role(false),
+    })
+}
+
+struct CodexDetailMessage {
+    text: String,
+    is_user: bool,
+    is_response_item: bool,
+    timestamp_ms: i64,
+    phase: Option<String>,
+    mirrored: bool,
+}
+
+fn codex_detail_message(
+    entry: &serde_json::Value,
+    timestamp_ms: i64,
+) -> Option<CodexDetailMessage> {
+    let payload = entry.get("payload")?;
+    let is_response_item = entry.get("type")?.as_str()? == "response_item";
+    let (is_user, text) = if is_response_item {
+        if payload.get("type")?.as_str()? != "message" {
+            return None;
+        }
+        let is_user = match payload.get("role")?.as_str()? {
+            "user" => true,
+            "assistant" => false,
+            _ => return None,
+        };
+        // Analysis/reasoning is private model work, not the displayed answer.
+        if ["channel", "phase"].iter().any(|key| {
+            matches!(
+                payload.get(*key).and_then(|value| value.as_str()),
+                Some("analysis" | "reasoning")
+            )
+        }) {
+            return None;
+        }
+        let content = payload.get("content")?;
+        let text = if let Some(text) = content.as_str() {
+            text.to_string()
+        } else {
+            content
+                .as_array()?
+                .iter()
+                .filter_map(|part| {
+                    matches!(
+                        part.get("type")?.as_str()?,
+                        "input_text" | "output_text" | "text"
+                    )
+                    .then(|| part.get("text")?.as_str())?
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        (is_user, text)
+    } else if let Some(message) = codex_event_message(entry, "user_message") {
+        (true, message.to_string())
+    } else if let Some(message) = codex_event_message(entry, "agent_message") {
+        (false, message.to_string())
+    } else {
+        return None;
+    };
+    let phase = payload
+        .get("phase")
+        .or_else(|| payload.get("channel"))
+        .and_then(|value| value.as_str())
+        .map(|phase| {
+            if phase == "final_answer" {
+                "final"
+            } else {
+                phase
+            }
+            .to_string()
+        });
+    Some(CodexDetailMessage {
+        text,
+        is_user,
+        is_response_item,
+        timestamp_ms,
+        phase,
+        mirrored: false,
     })
 }
 
@@ -725,6 +839,13 @@ pub fn build_snapshot_with_platform_resets(
     session_titles: &SessionTitleMap,
     weekly_reset_at_ms: &HashMap<String, i64>,
 ) -> Result<ActivitySnapshot, String> {
+    let pricing_models = messages.iter()
+        .filter(|message| !message.model_id.trim().is_empty() && message.timestamp <= generated_at_ms)
+        .map(|message| (message.client.clone(), message.model_id.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|(platform, model_id)| ObservedPricingModel { platform, model_id })
+        .collect();
     let discovered_platforms = messages
         .iter()
         .map(|message| message.client.clone())
@@ -775,6 +896,7 @@ pub fn build_snapshot_with_platform_resets(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    snapshot.pricing_models = pricing_models;
     Ok(snapshot)
 }
 
@@ -944,6 +1066,7 @@ fn build_snapshot_core(
         sources: Vec::new(),
         memory_usage: None,
         pricing_catalog: None,
+        pricing_models: Vec::new(),
     })
 }
 
@@ -1637,6 +1760,36 @@ mod tests {
     }
 
     #[test]
+    fn pricing_models_keep_exact_ids_before_display_grouping() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 13).unwrap();
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-07-13T12:00:00Z")
+            .unwrap().timestamp_millis();
+        let raw = "openai_codex/gpt-5.4-2026-03-05(high)";
+        let mut first = message("2026-07-13", timestamp, "session", "/tmp/session.jsonl", 10, 5);
+        first.model_id = raw.into();
+        let mut second = first.clone();
+        second.timestamp += 1_000;
+        second.model_id = "gpt-5.4".into();
+        let mut future = first.clone();
+        future.timestamp += 100_000;
+        future.model_id = "future-model".into();
+        let snapshot = build_snapshot(vec![first.clone(), first, second, future], today,
+            timestamp + 2_000, "UTC".into(), 30).unwrap();
+        assert_eq!(snapshot.pricing_models, vec![
+            ObservedPricingModel { platform: "codex".into(), model_id: "gpt-5.4".into() },
+            ObservedPricingModel { platform: "codex".into(), model_id: raw.into() },
+        ]);
+        assert!(snapshot.sessions.iter().flat_map(|session| &session.requests)
+            .all(|request| request.model == "gpt-5.4"));
+        let mut encoded = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(encoded["pricingModels"][1]["modelID"], raw);
+        assert!(encoded["pricingModels"][1].get("modelId").is_none());
+        encoded.as_object_mut().unwrap().remove("pricingModels");
+        let legacy: ActivitySnapshot = serde_json::from_value(encoded).unwrap();
+        assert!(legacy.pricing_models.is_empty());
+    }
+
+    #[test]
     fn preserves_model_effort_pairs_without_changing_turn_or_cost_totals() {
         let today = NaiveDate::from_ymd_opt(2026, 7, 13).unwrap();
         let mut high = message("2026-07-13", 600_000, "root", "/tmp/root.jsonl", 100, 10);
@@ -2148,6 +2301,101 @@ mod tests {
             detail.output.as_deref(),
             Some("first response\n\nsecond response")
         );
+    }
+
+    fn request_detail_fixture(rows: Vec<serde_json::Value>, start: i64, end: i64) -> RequestDetail {
+        let lines = rows
+            .into_iter()
+            .map(|row| row.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        extract_request_detail_from_reader(Cursor::new(lines), start, end).unwrap()
+    }
+
+    #[test]
+    fn request_detail_reads_response_items_and_preserves_text_parts() {
+        let detail = request_detail_fixture(
+            vec![
+                serde_json::json!({"timestamp":1000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"},{"type":"input_image","image_url":"hidden"}]}}),
+                serde_json::json!({"timestamp":1100,"type":"response_item","payload":{"type":"message","role":"assistant","channel":"final","content":[{"type":"output_text","text":"first\nline"},{"type":"text","text":"second paragraph"}]}}),
+            ],
+            1000,
+            1200,
+        );
+        assert_eq!(detail.prompt.as_deref(), Some("question"));
+        assert_eq!(
+            detail.output.as_deref(),
+            Some("first\nline\n\nsecond paragraph")
+        );
+    }
+
+    #[test]
+    fn request_detail_deduplicates_mirrors_but_preserves_repeated_messages() {
+        let mut rows = Vec::new();
+        for offset in [0, 10] {
+            rows.push(serde_json::json!({"timestamp":1000+offset,"type":"event_msg","payload":{"type":"agent_message","phase":"final_answer","message":"repeat"}}));
+            rows.push(serde_json::json!({"timestamp":1001+offset,"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"repeat"}]}}));
+        }
+        let detail = request_detail_fixture(rows, 1000, 1100);
+        assert_eq!(detail.output.as_deref(), Some("repeat\n\nrepeat"));
+    }
+
+    #[test]
+    fn request_detail_deduplicates_reverse_mirrors_and_keeps_distinct_phases() {
+        let detail = request_detail_fixture(
+            vec![
+                serde_json::json!({"timestamp":1000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"question"}]}}),
+                serde_json::json!({"timestamp":1001,"type":"event_msg","payload":{"type":"user_message","message":"question"}}),
+                serde_json::json!({"timestamp":1010,"type":"event_msg","payload":{"type":"agent_message","phase":"commentary","message":"same text"}}),
+                serde_json::json!({"timestamp":1020,"type":"response_item","payload":{"type":"message","role":"assistant","channel":"final","content":[{"type":"output_text","text":"same text"}]}}),
+            ],
+            1000,
+            1100,
+        );
+        assert_eq!(detail.prompt.as_deref(), Some("question"));
+        assert_eq!(detail.output.as_deref(), Some("same text\n\nsame text"));
+    }
+
+    #[test]
+    fn request_detail_skips_private_and_injected_content() {
+        let detail = request_detail_fixture(
+            vec![
+                serde_json::json!({"timestamp":1000,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"injected"}]}}),
+                serde_json::json!({"timestamp":1001,"type":"response_item","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"injected"}]}}),
+                serde_json::json!({"timestamp":1002,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>hidden</environment_context>"}]}}),
+                serde_json::json!({"timestamp":1003,"type":"response_item","payload":{"type":"reasoning","content":[{"type":"output_text","text":"private"}]}}),
+                serde_json::json!({"timestamp":1004,"type":"response_item","payload":{"type":"message","role":"assistant","channel":"analysis","content":[{"type":"output_text","text":"private"}]}}),
+                serde_json::json!({"timestamp":1005,"type":"response_item","payload":{"type":"function_call_output","output":"tool text"}}),
+                serde_json::json!({"timestamp":1006,"type":"response_item","payload":{"type":"agent_message","message":"subagent metadata"}}),
+            ],
+            1000,
+            1100,
+        );
+        assert_eq!(detail, RequestDetail::default());
+    }
+
+    #[test]
+    fn request_detail_scans_delayed_rows_without_borrowing_other_request_output() {
+        let detail = request_detail_fixture(
+            vec![
+                serde_json::json!({"timestamp":1000,"type":"event_msg","payload":{"type":"user_message","message":"request"}}),
+                serde_json::json!({"timestamp":2001,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"next request"}]}}),
+                serde_json::json!({"timestamp":1999,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"delayed write"}]}}),
+            ],
+            1000,
+            2000,
+        );
+        assert_eq!(detail.output.as_deref(), Some("delayed write"));
+        let pending = request_detail_fixture(
+            vec![
+                serde_json::json!({"timestamp":1000,"type":"event_msg","payload":{"type":"user_message","message":"request"}}),
+                serde_json::json!({"timestamp":2001,"type":"event_msg","payload":{"type":"agent_message","message":"next request"}}),
+            ],
+            1000,
+            2000,
+        );
+        assert_eq!(pending.prompt.as_deref(), Some("request"));
+        assert_eq!(pending.output, None);
     }
 
     #[test]

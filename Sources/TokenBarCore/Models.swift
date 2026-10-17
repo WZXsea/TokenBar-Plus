@@ -205,13 +205,56 @@ public struct QuotaWindowSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public struct QuotaResetCredit: Codable, Equatable, Sendable {
+    public let status: String
+    public let expiresAt: Date?
+
+    public init(status: String, expiresAt: Date?) {
+        self.status = status
+        self.expiresAt = expiresAt
+    }
+
+    public func isAvailable(at date: Date) -> Bool {
+        self.status == "available" && (self.expiresAt.map { $0 > date } ?? true)
+    }
+
+    public func effectiveStatus(at date: Date) -> String {
+        if self.status == "available", let expiresAt = self.expiresAt, expiresAt <= date {
+            return "expired"
+        }
+        return self.status
+    }
+}
+
 public struct QuotaResetCreditsSnapshot: Codable, Equatable, Sendable {
     public let availableCount: Int
     public let nextExpiresAt: Date?
+    public let credits: [QuotaResetCredit]
+    public let serverAvailableCount: Int?
 
-    public init(availableCount: Int, nextExpiresAt: Date?) {
+    public init(
+        availableCount: Int,
+        nextExpiresAt: Date?,
+        credits: [QuotaResetCredit] = [],
+        serverAvailableCount: Int? = nil)
+    {
         self.availableCount = max(0, availableCount)
         self.nextExpiresAt = nextExpiresAt
+        self.credits = credits
+        self.serverAvailableCount = serverAvailableCount
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case availableCount, nextExpiresAt, credits, serverAvailableCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            availableCount: try container.decode(Int.self, forKey: .availableCount),
+            nextExpiresAt: try container.decodeIfPresent(Date.self, forKey: .nextExpiresAt),
+            credits: try container.decodeIfPresent([QuotaResetCredit].self, forKey: .credits) ?? [],
+            serverAvailableCount: try container.decodeIfPresent(Int.self, forKey: .serverAvailableCount))
     }
 }
 
@@ -242,7 +285,7 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     }
 
     public var mostConstrainedWindow: (label: String, window: QuotaWindowSnapshot)? {
-        [("5h", self.session), ("W", self.weekly)]
+        [("5h", self.session), ("周", self.weekly)]
             .compactMap { label, window in window.map { (label, $0) } }
             .min { $0.1.remainingPercent < $1.1.remainingPercent }
     }
@@ -366,7 +409,7 @@ public struct RequestSummary: Codable, Equatable, Identifiable, Sendable {
         if let agent = self.agent?.normalizedMenuText {
             return agent
         }
-        return self.model.normalizedMenuText ?? "Request"
+        return self.model.normalizedMenuText ?? "请求"
     }
 
     public var physicalRequests: [RequestSummary] {
@@ -472,7 +515,7 @@ public struct SessionSummary: Codable, Equatable, Identifiable, Sendable {
         if let workspace = self.workspaceLabel?.normalizedMenuText {
             return workspace
         }
-        return self.models.first?.normalizedMenuText ?? "Session"
+        return self.models.first?.normalizedMenuText ?? "会话"
     }
 
     public func redactedForCache() -> SessionSummary {
@@ -802,6 +845,7 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
     public let days: [DailySummary]
     public let sources: [ActivitySourceSnapshot]?
     public let memoryUsage: MemoryUsageSnapshot?
+    public let pricingModels: [ObservedPricingModel]?
 
     public init(
         schemaVersion: Int,
@@ -813,7 +857,8 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
         weeklySinceReset: ActivityRangeSummary? = nil,
         sources: [ActivitySourceSnapshot]? = nil,
         rangeTotals: ActivityTotals? = nil,
-        memoryUsage: MemoryUsageSnapshot? = nil)
+        memoryUsage: MemoryUsageSnapshot? = nil,
+        pricingModels: [ObservedPricingModel]? = nil)
     {
         self.schemaVersion = schemaVersion
         self.generatedAtMs = generatedAtMs
@@ -825,6 +870,7 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
         self.days = days
         self.sources = sources
         self.memoryUsage = memoryUsage
+        self.pricingModels = pricingModels
     }
 
     public var generatedAt: Date {
@@ -839,7 +885,18 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
         guard let platform else { return self }
         guard let source = self.sourceSnapshots.first(where: { $0.platform == platform }) else {
             if platform == .codex, self.sourceSnapshots.isEmpty {
-                return self
+                return ActivitySnapshot(
+                    schemaVersion: self.schemaVersion,
+                    generatedAtMs: self.generatedAtMs,
+                    timezone: self.timezone,
+                    today: self.today,
+                    sessions: self.sessions,
+                    days: self.days,
+                    weeklySinceReset: self.weeklySinceReset,
+                    sources: self.sources,
+                    rangeTotals: self.rangeTotals,
+                    memoryUsage: self.memoryUsage,
+                    pricingModels: self.pricingModels?.filter { $0.platform == platform })
             }
             return ActivitySnapshot(
                 schemaVersion: self.schemaVersion,
@@ -857,7 +914,8 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
                 },
                 sources: [],
                 rangeTotals: .zero,
-                memoryUsage: platform == .codex ? self.memoryUsage : nil)
+                memoryUsage: platform == .codex ? self.memoryUsage : nil,
+                pricingModels: self.pricingModels?.filter { $0.platform == platform })
         }
         return ActivitySnapshot(
             schemaVersion: self.schemaVersion,
@@ -869,7 +927,8 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
             weeklySinceReset: source.weeklySinceReset,
             sources: [source],
             rangeTotals: source.rangeTotals,
-            memoryUsage: platform == .codex ? self.memoryUsage : nil)
+            memoryUsage: platform == .codex ? self.memoryUsage : nil,
+            pricingModels: self.pricingModels?.filter { $0.platform == platform })
     }
 
     public func redactedForCache() -> ActivitySnapshot {
@@ -883,7 +942,8 @@ public struct ActivitySnapshot: Codable, Equatable, Sendable {
             weeklySinceReset: self.weeklySinceReset,
             sources: self.sources,
             rangeTotals: self.rangeTotals,
-            memoryUsage: self.memoryUsage)
+            memoryUsage: self.memoryUsage,
+            pricingModels: self.pricingModels)
     }
 
     public func sessionMenu(limit: Int?) -> SessionMenuProjection {

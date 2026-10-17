@@ -23,14 +23,14 @@ public enum RequestDetailServiceError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .missingSessionPath:
-            return "The original session file is unavailable. Refresh TokenBar and try again."
+            return "原始会话文件暂不可用。请刷新 TokenBar 后重试。"
         case let .helperNotFound(paths):
-            let searched = paths.isEmpty ? "no candidate paths" : paths.joined(separator: ", ")
-            return "tokenbar-helper was not found (searched: \(searched))."
+            let searched = paths.isEmpty ? "候选路径为空" : paths.joined(separator: ", ")
+            return "tokenbar-helper 定位失败（已搜索：\(searched)）。"
         case .emptyOutput:
-            return "tokenbar-helper returned no request detail."
+            return "tokenbar-helper 返回的请求详情为空。"
         case let .invalidOutput(message):
-            return "tokenbar-helper returned invalid request detail JSON: \(message)"
+            return "tokenbar-helper 返回的请求详情 JSON 无效：\(message)"
         }
     }
 }

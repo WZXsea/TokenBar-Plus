@@ -47,7 +47,7 @@ enum ActivitySyncJSONValue: Codable, Equatable, Sendable {
             guard value.isFinite else {
                 throw DecodingError.dataCorruptedError(
                     in: container,
-                    debugDescription: "JSON number must be finite")
+                    debugDescription: "JSON 数值须为有限数")
             }
             self = .number(value)
         } else if let value = try? container.decode(String.self) {
@@ -59,7 +59,7 @@ enum ActivitySyncJSONValue: Codable, Equatable, Sendable {
         } else {
             throw DecodingError.dataCorruptedError(
                 in: container,
-                debugDescription: "Unsupported JSON value")
+                debugDescription: "JSON 值超出支持范围")
         }
     }
 
@@ -80,7 +80,7 @@ enum ActivitySyncJSONValue: Codable, Equatable, Sendable {
                     value,
                     EncodingError.Context(
                         codingPath: encoder.codingPath,
-                        debugDescription: "JSON number must be finite"))
+                        debugDescription: "JSON 数值须为有限数"))
             }
             try container.encode(value)
         case let .bool(value):
@@ -121,7 +121,7 @@ enum ActivitySyncSnapshotPartitioner {
         let encoded = try self.canonicalData(snapshot)
         let value = try JSONDecoder().decode(ActivitySyncJSONValue.self, from: encoded)
         guard var root = value.objectValue else {
-            throw ActivitySyncError.invalidResponse("snapshot must encode as an object")
+            throw ActivitySyncError.invalidResponse("快照须编码为对象")
         }
         let sessions = root.removeValue(forKey: "sessions")?.arrayValue ?? []
         let days = root.removeValue(forKey: "days")?.arrayValue ?? []
@@ -131,11 +131,11 @@ enum ActivitySyncSnapshotPartitioner {
         var sourceSummaries: [ActivitySyncJSONValue]? = nil
         if let sourcesValue {
             guard let sources = sourcesValue.arrayValue else {
-                throw ActivitySyncError.invalidResponse("snapshot sources must be an array")
+                throw ActivitySyncError.invalidResponse("快照 sources 须为数组")
             }
             sourceSummaries = try sources.map { source in
                 guard var object = source.objectValue else {
-                    throw ActivitySyncError.invalidResponse("snapshot source must be an object")
+                    throw ActivitySyncError.invalidResponse("快照 source 须为对象")
                 }
                 object.removeValue(forKey: "days")
                 return .object(object)
@@ -144,7 +144,7 @@ enum ActivitySyncSnapshotPartitioner {
         var memorySummary: ActivitySyncJSONValue = .null
         if let memoryValue {
             guard var object = memoryValue.objectValue else {
-                throw ActivitySyncError.invalidResponse("snapshot memoryUsage must be an object")
+                throw ActivitySyncError.invalidResponse("快照 memoryUsage 须为对象")
             }
             object.removeValue(forKey: "days")
             memorySummary = .object(object)
@@ -159,7 +159,7 @@ enum ActivitySyncSnapshotPartitioner {
         ]
         for day in days {
             guard let date = day.objectValue?["date"]?.stringValue else {
-                throw ActivitySyncError.invalidResponse("snapshot day date is invalid")
+                throw ActivitySyncError.invalidResponse("快照的每日数据日期无效")
             }
             try self.insert(day, key: self.partitionKey("day", [date]), into: &result)
         }
@@ -168,11 +168,11 @@ enum ActivitySyncSnapshotPartitioner {
                   let platform = sourceObject["platform"]?.stringValue,
                   let sourceDays = sourceObject["days"]?.arrayValue
             else {
-                throw ActivitySyncError.invalidResponse("snapshot source is invalid")
+                throw ActivitySyncError.invalidResponse("快照来源无效")
             }
             for day in sourceDays {
                 guard let date = day.objectValue?["date"]?.stringValue else {
-                    throw ActivitySyncError.invalidResponse("snapshot source day is invalid")
+                    throw ActivitySyncError.invalidResponse("快照来源的每日数据无效")
                 }
                 try self.insert(
                     .object(["platform": .string(platform), "day": day]),
@@ -184,7 +184,7 @@ enum ActivitySyncSnapshotPartitioner {
             guard let object = session.objectValue,
                   let id = object["id"]?.stringValue
             else {
-                throw ActivitySyncError.invalidResponse("snapshot session identity is invalid")
+                throw ActivitySyncError.invalidResponse("快照会话标识无效")
             }
             let platform = object["platform"]?.stringValue ?? ""
             try self.insert(
@@ -194,7 +194,7 @@ enum ActivitySyncSnapshotPartitioner {
         }
         for day in memoryValue?.objectValue?["days"]?.arrayValue ?? [] {
             guard let date = day.objectValue?["date"]?.stringValue else {
-                throw ActivitySyncError.invalidResponse("snapshot memory day is invalid")
+                throw ActivitySyncError.invalidResponse("快照的每日记忆数据无效")
             }
             try self.insert(
                 day,
@@ -202,7 +202,7 @@ enum ActivitySyncSnapshotPartitioner {
                 into: &result)
         }
         guard result.count <= self.maximumPartitions else {
-            throw ActivitySyncError.invalidResponse("snapshot contains too many partitions")
+            throw ActivitySyncError.invalidResponse("快照的分区数量超出上限")
         }
         return result
     }
@@ -211,7 +211,7 @@ enum ActivitySyncSnapshotPartitioner {
         _ partitions: [String: ActivitySyncJSONValue]) throws -> [String: String]
     {
         guard partitions.count <= self.maximumPartitions else {
-            throw ActivitySyncError.invalidResponse("snapshot contains too many partitions")
+            throw ActivitySyncError.invalidResponse("快照的分区数量超出上限")
         }
         return try partitions.mapValues { value in
             self.sha256Hex(try self.canonicalData(value))
@@ -231,10 +231,10 @@ enum ActivitySyncSnapshotPartitioner {
               Set(summary.keys) == Set(["snapshot", "sources", "memoryUsage"]),
               var root = summary["snapshot"]?.objectValue
         else {
-            throw ActivitySyncError.invalidResponse("incremental summary is invalid")
+            throw ActivitySyncError.invalidResponse("增量同步摘要无效")
         }
         guard ["sessions", "days", "sources", "memoryUsage"].allSatisfy({ root[$0] == nil }) else {
-            throw ActivitySyncError.invalidResponse("incremental summary contains split fields")
+            throw ActivitySyncError.invalidResponse("增量同步摘要包含分拆字段")
         }
 
         var days: [ActivitySyncJSONValue] = []
@@ -246,7 +246,7 @@ enum ActivitySyncSnapshotPartitioner {
                 guard let date = value.objectValue?["date"]?.stringValue,
                       key == self.partitionKey("day", [date])
                 else {
-                    throw ActivitySyncError.invalidResponse("incremental day identity is invalid")
+                    throw ActivitySyncError.invalidResponse("增量同步的每日数据标识无效")
                 }
                 days.append(value)
             } else if key.hasPrefix("source-day:") {
@@ -257,29 +257,29 @@ enum ActivitySyncSnapshotPartitioner {
                       let date = day.objectValue?["date"]?.stringValue,
                       key == self.partitionKey("source-day", [platform, date])
                 else {
-                    throw ActivitySyncError.invalidResponse("incremental source-day identity is invalid")
+                    throw ActivitySyncError.invalidResponse("增量同步的来源每日数据标识无效")
                 }
                 sourceDays[platform, default: []].append(day)
             } else if key.hasPrefix("session:") {
                 guard let object = value.objectValue,
                       let id = object["id"]?.stringValue
                 else {
-                    throw ActivitySyncError.invalidResponse("incremental session identity is invalid")
+                    throw ActivitySyncError.invalidResponse("增量同步的会话标识无效")
                 }
                 let platform = object["platform"]?.stringValue ?? ""
                 guard key == self.partitionKey("session", [platform, id]) else {
-                    throw ActivitySyncError.invalidResponse("incremental session identity is invalid")
+                    throw ActivitySyncError.invalidResponse("增量同步的会话标识无效")
                 }
                 sessions.append(value)
             } else if key.hasPrefix("memory-day:") {
                 guard let date = value.objectValue?["date"]?.stringValue,
                       key == self.partitionKey("memory-day", [date])
                 else {
-                    throw ActivitySyncError.invalidResponse("incremental memory-day identity is invalid")
+                    throw ActivitySyncError.invalidResponse("增量同步的每日记忆数据标识无效")
                 }
                 memoryDays.append(value)
             } else {
-                throw ActivitySyncError.invalidResponse("incremental partition kind is invalid")
+                throw ActivitySyncError.invalidResponse("增量同步的分区类型无效")
             }
         }
         days.sort { self.date(of: $0) > self.date(of: $1) }
@@ -311,7 +311,7 @@ enum ActivitySyncSnapshotPartitioner {
                       let platform = object["platform"]?.stringValue,
                       platforms.insert(platform).inserted
                 else {
-                    throw ActivitySyncError.invalidResponse("incremental source summary is invalid")
+                    throw ActivitySyncError.invalidResponse("增量同步的来源摘要无效")
                 }
                 var platformDays = sourceDays.removeValue(forKey: platform) ?? []
                 platformDays.sort { self.date(of: $0) > self.date(of: $1) }
@@ -319,7 +319,7 @@ enum ActivitySyncSnapshotPartitioner {
                 sources.append(.object(object))
             }
             guard sourceDays.isEmpty else {
-                throw ActivitySyncError.invalidResponse("incremental source-day has no source")
+                throw ActivitySyncError.invalidResponse("增量同步的来源每日数据缺少来源")
             }
             sources.sort {
                 ($0.objectValue?["platform"]?.stringValue ?? "")
@@ -328,16 +328,16 @@ enum ActivitySyncSnapshotPartitioner {
             root["sources"] = .array(sources)
         case .null:
             guard sourceDays.isEmpty else {
-                throw ActivitySyncError.invalidResponse("incremental source-day has no source")
+                throw ActivitySyncError.invalidResponse("增量同步的来源每日数据缺少来源")
             }
         default:
-            throw ActivitySyncError.invalidResponse("incremental source summaries are invalid")
+            throw ActivitySyncError.invalidResponse("增量同步的来源摘要无效")
         }
 
         switch summary["memoryUsage"] {
         case let .object(memorySummary):
             guard memorySummary["days"] == nil else {
-                throw ActivitySyncError.invalidResponse("incremental memory summary is invalid")
+                throw ActivitySyncError.invalidResponse("增量同步的记忆摘要无效")
             }
             var memory = memorySummary
             memoryDays.sort { self.date(of: $0) > self.date(of: $1) }
@@ -345,10 +345,10 @@ enum ActivitySyncSnapshotPartitioner {
             root["memoryUsage"] = .object(memory)
         case .null:
             guard memoryDays.isEmpty else {
-                throw ActivitySyncError.invalidResponse("incremental memory-day has no summary")
+                throw ActivitySyncError.invalidResponse("增量同步的每日记忆数据缺少摘要")
             }
         default:
-            throw ActivitySyncError.invalidResponse("incremental memory summary is invalid")
+            throw ActivitySyncError.invalidResponse("增量同步的记忆摘要无效")
         }
         return try JSONDecoder().decode(
             ActivitySnapshot.self,
@@ -365,7 +365,7 @@ enum ActivitySyncSnapshotPartitioner {
               Set(deletes).count == deletes.count,
               Set(upserts.keys).isDisjoint(with: deletes)
         else {
-            throw ActivitySyncError.invalidResponse("incremental changes are invalid")
+            throw ActivitySyncError.invalidResponse("增量同步变更无效")
         }
         var partitions = try self.partitions(snapshot)
         for key in deletes {
@@ -373,7 +373,7 @@ enum ActivitySyncSnapshotPartitioner {
         }
         for (key, value) in upserts {
             guard !key.isEmpty, key.count <= 256 else {
-                throw ActivitySyncError.invalidResponse("incremental partition key is invalid")
+                throw ActivitySyncError.invalidResponse("增量同步的分区键无效")
             }
             partitions[key] = value
         }
@@ -401,7 +401,7 @@ enum ActivitySyncSnapshotPartitioner {
         into partitions: inout [String: ActivitySyncJSONValue]) throws
     {
         guard partitions.updateValue(value, forKey: key) == nil else {
-            throw ActivitySyncError.invalidResponse("snapshot contains duplicate partitions")
+            throw ActivitySyncError.invalidResponse("快照包含重复分区")
         }
     }
 
@@ -664,7 +664,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
         do {
             try await self.incrementalStore.save(state)
         } catch {
-            let storageMessage = "Incremental sync metadata could not be saved: \(error.localizedDescription)"
+            let storageMessage = "增量同步元数据保存失败：\(error.localizedDescription)"
             downloadErrorDescription = [downloadErrorDescription, storageMessage]
                 .compactMap { $0 }
                 .joined(separator: " ")
@@ -778,7 +778,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                   value.receivedAtMs > 0,
                   ["created", "updated", "retry"].contains(value.status)
             else {
-                throw ActivitySyncError.invalidResponse("invalid protocol-v2 upload metadata")
+                throw ActivitySyncError.invalidResponse("protocol-v2 上传元数据无效")
             }
             return value
         } catch let error as ActivitySyncError {
@@ -800,7 +800,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
             lastFullAtMs = nowMs
         case .delta:
             guard let previous = plan.previousLastFullAtMs else {
-                throw ActivitySyncError.invalidResponse("missing full calibration metadata")
+                throw ActivitySyncError.invalidResponse("完整校准元数据缺失")
             }
             lastFullAtMs = previous
         }
@@ -870,7 +870,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                   uuid.uuidString.lowercased() == deviceID,
                   deviceID != configuration.device.id
             else {
-                throw ActivitySyncError.invalidResponse("deleted device ID is invalid")
+                throw ActivitySyncError.invalidResponse("已删除设备的 ID 无效")
             }
             entries.removeValue(forKey: deviceID)
         }
@@ -883,7 +883,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                   change.receivedAtMs > 0,
                   self.valid(manifest: change.manifest)
             else {
-                throw ActivitySyncError.invalidResponse("incremental snapshot metadata is invalid")
+                throw ActivitySyncError.invalidResponse("增量同步快照的元数据无效")
             }
             let snapshot: ActivitySnapshot
             switch change.mode {
@@ -892,7 +892,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                       change.upserts == nil,
                       change.deletes == nil
                 else {
-                    throw ActivitySyncError.invalidResponse("full snapshot change is invalid")
+                    throw ActivitySyncError.invalidResponse("完整快照变更无效")
                 }
                 snapshot = value.redactedForSync()
             case "delta":
@@ -902,14 +902,14 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                       let deletes = change.deletes,
                       let previous = entries[change.device.id]
                 else {
-                    throw ActivitySyncError.invalidResponse("delta snapshot has no valid base")
+                    throw ActivitySyncError.invalidResponse("差量快照缺少有效的基础快照")
                 }
                 snapshot = try ActivitySyncSnapshotPartitioner.apply(
                     snapshot: previous.snapshot,
                     upserts: upserts,
                     deletes: deletes).redactedForSync()
             default:
-                throw ActivitySyncError.invalidResponse("incremental snapshot mode is invalid")
+                throw ActivitySyncError.invalidResponse("增量同步快照的模式无效")
             }
             try Self.validate(
                 device: change.device,
@@ -918,7 +918,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                 snapshot: snapshot)
             let partitionKeys = Set(try ActivitySyncSnapshotPartitioner.partitions(snapshot).keys)
             guard partitionKeys == Set(change.manifest.keys) else {
-                throw ActivitySyncError.invalidResponse("incremental manifest keys do not converge")
+                throw ActivitySyncError.invalidResponse("增量同步清单键尚未收敛")
             }
             entries[change.device.id] = ActivitySyncV2RemoteEntry(
                 device: change.device,
@@ -956,7 +956,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                           == (try ActivitySyncSnapshotPartitioner.snapshotDigest(remote.snapshot)),
                       deviceIDs.insert(remote.device.id).inserted
                 else {
-                    throw ActivitySyncError.invalidResponse("cached incremental metadata is invalid")
+                    throw ActivitySyncError.invalidResponse("缓存的增量同步元数据无效")
                 }
                 try Self.validate(
                     device: remote.device,
@@ -966,7 +966,7 @@ extension ActivitySyncRemoteClient: ActivitySyncIncrementalNetworking {
                 guard Set(try ActivitySyncSnapshotPartitioner.partitions(remote.snapshot).keys)
                     == Set(remote.manifest.keys)
                 else {
-                    throw ActivitySyncError.invalidResponse("cached incremental manifest is invalid")
+                    throw ActivitySyncError.invalidResponse("缓存的增量同步清单无效")
                 }
             }
         } catch {

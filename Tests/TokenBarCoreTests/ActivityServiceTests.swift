@@ -275,6 +275,31 @@ struct ActivityServiceTests {
         ])
     }
 
+    @Test("custom pricing follows enabled rules on every snapshot and historical fetch")
+    func customPricingFollowsPreference() async throws {
+        let runner = RecordingActivityHelperRunner(output: Self.fixtureData)
+        let preference = MemoryDatabaseURLPreference(value: nil)
+        let service = ActivityService(
+            customPricingURLProvider: { await preference.value },
+            resolveHelper: { URL(fileURLWithPath: "/fixture/tokenbar-helper") },
+            runner: runner)
+        _ = try await service.fetchActivity()
+        #expect(await runner.arguments == ["--statistics-timezone", "utc"])
+        await preference.update(URL(fileURLWithPath: "/tmp/custom prices.json"))
+        _ = try await service.fetchActivity()
+        #expect(await runner.arguments == [
+            "--statistics-timezone", "utc", "--custom-pricing-json", "/tmp/custom prices.json",
+        ])
+        _ = try await service.fetchSessions(on: "2026-08-31", statisticsTimeZone: .utc)
+        #expect(await runner.arguments == [
+            "--days", "1", "--end-date", "2026-08-31", "--statistics-timezone", "utc",
+            "--custom-pricing-json", "/tmp/custom prices.json",
+        ])
+        await preference.update(nil)
+        _ = try await service.fetchActivity()
+        #expect(await runner.arguments == ["--statistics-timezone", "utc"])
+    }
+
     @Test("omits the memory database when monitoring is turned off")
     func followsMemoryDatabasePreference() async throws {
         let runner = RecordingActivityHelperRunner(output: Self.fixtureData)

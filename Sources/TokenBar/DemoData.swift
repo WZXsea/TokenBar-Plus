@@ -23,11 +23,39 @@ struct DemoQuotaProvider: QuotaProviding {
             "resetCredits": [
                 "availableCount": 2,
                 "nextExpiresAt": now.addingTimeInterval(5 * 86_400).timeIntervalSinceReferenceDate,
+                "serverAvailableCount": 2,
+                "credits": [
+                    ["status": "available", "expiresAt": now.addingTimeInterval(5 * 86_400).timeIntervalSinceReferenceDate],
+                    ["status": "available", "expiresAt": now.addingTimeInterval(6 * 86_400).timeIntervalSinceReferenceDate],
+                    ["status": "redeemed", "expiresAt": now.addingTimeInterval(-86_400).timeIntervalSinceReferenceDate],
+                    ["status": "available", "expiresAt": now.addingTimeInterval(-2 * 86_400).timeIntervalSinceReferenceDate],
+                    ["status": "future-status", "expiresAt": NSNull()],
+                ],
             ],
             "updatedAt": now.timeIntervalSinceReferenceDate,
         ]
         return try JSONDecoder().decode(QuotaSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
     }
+}
+
+struct DemoQuotaDayHistoryCache: WeeklyQuotaUsageCaching {
+    func loadWeeklyQuotaUsage() async throws -> [TokenPlatform: WeeklyQuotaUsageHistory] {
+        let quota = try await DemoQuotaProvider().fetchQuota()
+        guard let weekly = quota.weekly else { return [:] }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        let today = calendar.startOfDay(for: quota.updatedAt)
+        func sample(_ used: Double, at date: Date) -> QuotaSnapshot {
+            QuotaSnapshot(session: nil,
+                weekly: QuotaWindowSnapshot(usedPercent: used, windowMinutes: weekly.windowMinutes, resetsAt: weekly.resetsAt),
+                resetCredits: nil, updatedAt: date)
+        }
+        let baseline = sample(12, at: today.addingTimeInterval(-2 * 86_400 + 3_600))
+        guard let history = WeeklyQuotaUsageHistory.starting(with: baseline) else { return [:] }
+        return [.codex: history.recording(sample(20, at: today.addingTimeInterval(-86_400 + 3_600)))
+            .recording(sample(31, at: quota.updatedAt.addingTimeInterval(-1)))]
+    }
+    func saveWeeklyQuotaUsage(_ histories: [TokenPlatform: WeeklyQuotaUsageHistory]) async throws {}
 }
 
 struct DemoClaudeQuotaProvider: QuotaProviding {
@@ -114,8 +142,12 @@ struct DemoActivityProvider: ActivityProviding {
         try self.makeSnapshot(sinceWeeklyResetAtByPlatform: sinceWeeklyResetAtByPlatform)
     }
 
+    func fetchHistory(days: Int, endDate: String, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot {
+        try self.makeSnapshot(sinceWeeklyResetAtByPlatform: [:], historyDays: days)
+    }
+
     private func makeSnapshot(
-        sinceWeeklyResetAtByPlatform: [TokenPlatform: Date]) throws -> ActivitySnapshot
+        sinceWeeklyResetAtByPlatform: [TokenPlatform: Date], historyDays: Int = 30) throws -> ActivitySnapshot
     {
         let now = Date()
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
@@ -153,7 +185,9 @@ struct DemoActivityProvider: ActivityProviding {
             let platform = sessionIndex.isMultiple(of: 2)
                 ? TokenPlatform.codex
                 : TokenPlatform.claude
-            let model = platform == .codex ? "gpt-5" : "claude-sonnet-4-5"
+            let model = platform == .codex
+                ? (ProcessInfo.processInfo.environment["TOKENBAR_DEMO_MULTI_MODEL"] == "1" && !sessionIndex.isMultiple(of: 4) ? "gpt-5-mini" : "gpt-5")
+                : "claude-sonnet-4-5"
             let provider = platform == .codex ? "openai" : "anthropic"
             let agent = platform == .codex ? "codex" : "claude"
             var requests: [[String: Any]] = []
@@ -302,9 +336,9 @@ struct DemoActivityProvider: ActivityProviding {
         var weeklySessionCount: [TokenPlatform: Int] = [
             .codex: 0, .claude: 0, .grok: 0, .antigravity: 0,
         ]
-        for offset in (0 ..< 30).reversed() {
+        for offset in (0 ..< historyDays).reversed() {
             let date = calendar.date(byAdding: .day, value: -offset, to: now) ?? now
-            let wave = Int64((29 - offset) % 7)
+            let wave = Int64((historyDays - 1 - offset) % 7)
             let tokens = DemoTokenCounter(
                 input: 14_000 + wave * 1_800,
                 output: 8_000 + wave * 900,
@@ -707,28 +741,40 @@ enum DemoPreviewRenderer {
         if !visibleScopes.contains(model.scope) {
             model.scope = .codex
         }
+        let sections = ProcessInfo.processInfo.environment["TOKENBAR_DEMO_DASHBOARD_SECTIONS"]
+            .map { value in
+                value.split(separator: ",")
+                    .compactMap { TokenBarDashboardSection(rawValue: String($0)) }
+            } ?? TokenBarSettings.shared.visibleDashboardSections
         let height = DashboardSummaryView.preferredHeight(
             quota: model.quotaState(for: model.scope.platform).value,
             providesQuota: model.providesQuota(for: model.scope.platform),
             showsClaude: showsClaude,
             showsGrok: showsGrok,
-            showsAntigravity: showsAntigravity)
+            showsAntigravity: showsAntigravity,
+            sections: sections)
         let content = DashboardSummaryView(
             model: model,
             showsClaude: showsClaude,
             showsGrok: showsGrok,
             showsAntigravity: showsAntigravity,
             usesWeekdayWeeklyPacing: false,
-            accentColor: .purple)
+            accentColor: .purple,
+            sections: sections)
             .frame(width: 384, height: height, alignment: .top)
             .background(Color.white)
             .environment(\.colorScheme, .light)
-        let renderer = ImageRenderer(content: content)
-        renderer.scale = 2
-        guard let image = renderer.cgImage else { return }
-        let representation = NSBitmapImageRep(cgImage: image)
-        guard let data = representation.representation(using: .png, properties: [:]) else { return }
-        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        let host = NSHostingView(rootView: content)
+        host.frame = NSRect(x: 0, y: 0, width: 384, height: height)
+        let canvas = DemoRowPreviewCanvas(frame: host.bounds)
+        host.frame = canvas.bounds
+        canvas.addSubview(host)
+        let window = NSWindow(contentRect: canvas.bounds, styleMask: .borderless, backing: .buffered,
+            defer: false, screen: NSScreen.main)
+        window.isReleasedWhenClosed = false
+        window.contentView = canvas
+        defer { window.close() }
+        try self.render(view: canvas, scale: 2, path: path)
     }
 
     static func renderRows(model: DashboardModel, path: String) throws {
@@ -748,24 +794,27 @@ enum DemoPreviewRenderer {
                 x: 0,
                 y: 0,
                 width: width,
-                height: TokenMenuRowView.rowHeight * CGFloat(rowCount)))
-        let sessionRow = TokenMenuRowView(width: width)
+                height: TokenMenuRowView.rowHeight * CGFloat(rowCount - 1) + TokenMenuRowView.compactRowHeight))
+        let sessionRow = TokenMenuRowView(width: width, compact: true)
         sessionRow.configure(
             title: session.menuDisplayTitle,
             cost: session.menuCostText,
-            detail: session.menuDetail,
+            detail: session.tokens.total.compactCount,
             trailing: Date(timeIntervalSince1970: Double(session.endedAtMs) / 1000).demoClockText,
             showsChevron: true,
-            badge: session.menuServiceTierBadge)
+            badge: session.menuServiceTierBadge,
+            rate: nil)
 
         let requestRow = TokenMenuRowView(width: width)
         requestRow.configure(
             title: request.menuRowTitle,
             cost: request.menuCostText,
-            detail: request.menuDetail,
+            detail: [request.tokens.requestMenuDetail, request.menuTTFTText]
+                .compactMap { $0 }.joined(separator: " · "),
             trailing: "\(request.startedAt.demoClockText) · \(request.menuDurationText)",
             showsChevron: true,
-            badge: request.menuServiceTierBadge)
+            badge: request.menuServiceTierBadge,
+            rate: request.menuAverageTPSText)
 
         var rows = [sessionRow, requestRow]
         rows.append(contentsOf: physicalRequests.map { physicalRequest in
@@ -773,14 +822,18 @@ enum DemoPreviewRenderer {
             row.configure(
                 title: physicalRequest.agentRequestMenuTitle,
                 cost: physicalRequest.menuCostText,
-                detail: physicalRequest.menuDetail,
+                detail: [physicalRequest.tokens.requestMenuDetail, physicalRequest.menuTTFTText]
+                    .compactMap { $0 }.joined(separator: " · "),
                 trailing: "\(physicalRequest.startedAt.demoClockText) · \(physicalRequest.menuDurationText)",
                 showsChevron: true,
-                badge: physicalRequest.menuServiceTierBadge)
+                badge: physicalRequest.menuServiceTierBadge,
+                rate: physicalRequest.menuAverageTPSText)
             return row
         })
-        for (index, row) in rows.enumerated() {
-            row.frame.origin.y = TokenMenuRowView.rowHeight * CGFloat(rowCount - index - 1)
+        var rowY = canvas.bounds.height
+        for row in rows {
+            rowY -= row.frame.height
+            row.frame.origin.y = rowY
             canvas.addSubview(row)
         }
         canvas.layoutSubtreeIfNeeded()
@@ -922,12 +975,49 @@ enum DemoPreviewRenderer {
         try self.render(view: canvas, scale: 2, path: path)
     }
 
+    static func renderPricing(path: String) throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TokenBarPricingPreview-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ModelPricingStore(fileURL: directory.appendingPathComponent("prices.json"))
+        try store.upsert(ModelPriceOverride(
+            platform: .codex, modelID: "example-model", serviceTier: .standard,
+            inputPerMillion: 2, cachedInputPerMillion: 0.2,
+            cacheWritePerMillion: 0, outputPerMillion: 10))
+        let content = ModelPricingSettingsView(
+            store: store,
+            quoteService: ModelPriceQuoteService(),
+            observedModels: [.init(platform: .codex, modelID: "example-model")])
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .light)
+        let host = NSHostingView(rootView: content)
+        host.frame = NSRect(x: 0, y: 0, width: 620, height: 660)
+        let canvas = DemoRowPreviewCanvas(frame: host.bounds)
+        canvas.addSubview(host)
+        try self.render(view: canvas, scale: 2, path: path)
+    }
+
+    static func renderResetCredits(snapshot: QuotaResetCreditsSnapshot, sampledAt: Date, path: String) throws {
+        let content = ResetCreditsDetailView(snapshot: snapshot, sampledAt: sampledAt)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .environment(\.colorScheme, .light)
+        let host = NSHostingView(rootView: content)
+        host.frame = NSRect(
+            x: 0, y: 0, width: ResetCreditsDetailView.preferredWidth,
+            height: ResetCreditsDetailView.preferredHeight(for: snapshot))
+        let canvas = DemoRowPreviewCanvas(frame: host.bounds)
+        canvas.addSubview(host)
+        try self.render(view: canvas, scale: 2, path: path)
+    }
+
     static func renderStatus(path: String) throws {
         let statusImage = StatusLabelRenderer.layout(
-            codexToday: "359M",
-            codexWeekly: "68%",
-            claudeToday: "141K",
-            claudeWeekly: "54%").image
+            contents: [StatusBarPlatformContent(
+                scope: .codex,
+                top: "132M",
+                bottom: "61%",
+                unreadCount: 2,
+                trendRates: [42, 48, 38, 61, 65, 57, 81, 69, 75, 52, 68, 72, 64, 77, 83, 70])]).image
         let padding: CGFloat = 4
         let canvas = DemoRowPreviewCanvas(frame: NSRect(
             x: 0,

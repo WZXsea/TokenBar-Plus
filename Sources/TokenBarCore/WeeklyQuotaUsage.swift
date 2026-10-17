@@ -20,6 +20,8 @@ public struct WeeklyQuotaDailyUsage: Equatable, Identifiable, Sendable {
 
 public struct WeeklyQuotaUsageHistory: Codable, Equatable, Sendable {
     private static let retentionDuration: TimeInterval = 32 * 86_400
+    // Reset timestamps can move slightly between server samples without a new quota cycle.
+    private static let windowTimestampTolerance: TimeInterval = 5 * 60
 
     public let currentWindowStart: Date
     public let currentWindowEnd: Date
@@ -57,6 +59,8 @@ public struct WeeklyQuotaUsageHistory: Codable, Equatable, Sendable {
         let isCurrentWindow = self.matches(
             windowStart: sample.windowStart,
             windowEnd: sample.windowEnd)
+            && sample.sampledAt < self.currentWindowEnd
+            && sample.windowStart <= self.lastSampledAt
         let highWaterUsedPercent: Double
         if isCurrentWindow {
             highWaterUsedPercent = max(self.highWaterUsedPercent, sample.usedPercent)
@@ -142,16 +146,17 @@ public struct WeeklyQuotaUsageHistory: Codable, Equatable, Sendable {
               }),
               Self.isChronological(self.baselines.map(\.sampledAt)),
               Self.isChronological(self.increments.map(\.sampledAt)),
-              (self.baselines.last?.sampledAt ?? .distantPast) >= self.currentWindowStart
+              (self.baselines.last?.sampledAt ?? .distantPast)
+                  >= self.currentWindowStart.addingTimeInterval(-Self.windowTimestampTolerance)
         else {
             return nil
         }
         return self
     }
 
-    private func matches(windowStart: Date, windowEnd: Date) -> Bool {
-        abs(self.currentWindowStart.timeIntervalSince(windowStart)) < 1
-            && abs(self.currentWindowEnd.timeIntervalSince(windowEnd)) < 1
+    func matches(windowStart: Date, windowEnd: Date) -> Bool {
+        abs(self.currentWindowStart.timeIntervalSince(windowStart)) <= Self.windowTimestampTolerance
+            && abs(self.currentWindowEnd.timeIntervalSince(windowEnd)) <= Self.windowTimestampTolerance
     }
 
     private static func dateKey(for date: Date, timeZone: TimeZone) -> String {

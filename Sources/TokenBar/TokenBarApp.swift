@@ -18,7 +18,10 @@ struct TokenBarApp: App {
                 },
                 testResetAnimation: {
                     self.appDelegate.testResetAnimation()
-                })
+                },
+                pricingStore: self.appDelegate.modelPricingStore,
+                priceQuoteService: self.appDelegate.modelPriceQuoteService,
+                observedPricingModels: self.appDelegate.observedPricingModels)
         }
     }
 }

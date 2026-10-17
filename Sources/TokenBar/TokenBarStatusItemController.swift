@@ -8,7 +8,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private static let menuWidth: CGFloat = 384
     private static let requestDetailCacheLimit = 64
 
-    private struct RenderedSessionProjection {
+    private struct RenderedSessionProjection: Equatable {
         let ids: [String]
         let collapsedLimit: Int
     }
@@ -16,6 +16,12 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private struct SessionHistoryKey: Hashable {
         let date: String
         let statisticsTimeZone: String
+    }
+
+    private struct ResetCreditsMenuContext: Equatable {
+        let platform: TokenPlatform
+        let snapshot: QuotaResetCreditsSnapshot
+        let sampledAt: Date
     }
 
     private struct SyncSettingsSignature: Equatable {
@@ -39,6 +45,8 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private let settings: TokenBarSettings
     private let memoryTelemetry: MemoryTelemetryController
     private let activitySync: ActivitySyncController
+    private let pricingStore: ModelPricingStore
+    private var pricingRevision: Int
     private let requestDetailService: any RequestDetailProviding
     private let sessionLauncher: SessionLauncher
     private let unreadTasks: DesktopUnreadTaskMonitor
@@ -46,6 +54,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private let statusItem: NSStatusItem
     private let rootMenu = TokenBarMenu()
     private var statusLabelLayout: StatusLabelLayout?
+    private var statusBarContents: [StatusBarPlatformContent] = []
     private var nextMenuScopeOverride: DashboardScope?
     private var sessionItems: [NSMenuItem] = []
     private var renderedSessionProjection: RenderedSessionProjection?
@@ -57,7 +66,6 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private var requestDetailCache: [String: RequestDetail] = [:]
     private var requestDetailCacheOrder: [String] = []
     private var sessionExpansionItem: NSMenuItem?
-    private var sessionExpansionView: PersistentMenuActionRowView?
     private var sessionEmptyItem: NSMenuItem?
     private var activityDetailItem: NSMenuItem?
     private var activitySessionMenu: TokenBarMenu?
@@ -73,9 +81,12 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private var loadingSessionHistoryKey: SessionHistoryKey?
     private var sessionHistoryTask: Task<Void, Never>?
     private var memoryItem: NSMenuItem?
-    private var overviewHost: FixedMenuHostingView?
+    private var summaryHosts: [TokenBarDashboardSection: FixedMenuHostingView] = [:]
+    private var summaryItems: [TokenBarDashboardSection: NSMenuItem] = [:]
+    private var resetCreditsItem: NSMenuItem?
+    private var resetCreditsHost: FixedMenuHostingView?
+    private var resetCreditsContext: ResetCreditsMenuContext?
     private var highlightedRows: [ObjectIdentifier: any TokenMenuHighlighting] = [:]
-    private var showsAllSessions = false
     private var showsAllActivitySessions = false
     private var isRootMenuOpen = false
     private var startupTask: Task<Void, Never>?
@@ -91,12 +102,15 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         showSettings: @escaping () -> Void,
         requestDetailService: any RequestDetailProviding = CodexRequestDetailService(),
         sessionLauncher: SessionLauncher = SessionLauncher(),
-        unreadTasks: DesktopUnreadTaskMonitor = DesktopUnreadTaskMonitor())
+        unreadTasks: DesktopUnreadTaskMonitor = DesktopUnreadTaskMonitor(),
+        pricingStore: ModelPricingStore = .shared)
     {
         self.model = model
         self.settings = settings
         self.memoryTelemetry = memoryTelemetry
         self.activitySync = activitySync
+        self.pricingStore = pricingStore
+        self.pricingRevision = pricingStore.revision
         self.showSettingsAction = showSettings
         self.requestDetailService = requestDetailService
         self.sessionLauncher = sessionLauncher
@@ -171,6 +185,11 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 self.model.scope = .codex
             }
             self.rebuildRootMenu()
+            return
+        }
+
+        if menu === self.resetCreditsItem?.submenu {
+            self.updateResetCreditsItem(for: self.model.scope)
             return
         }
 
@@ -261,77 +280,51 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
 
     private func updateStatusButton() {
         guard let button = self.statusItem.button else { return }
-        let codex = self.statusValues(for: .codex)
-        let claude = self.settings.showsClaude ? self.statusValues(for: .claude) : nil
-        let grok = self.settings.showsGrok ? self.statusValues(for: .grok) : nil
-        let antigravity = self.settings.showsAntigravity
-            ? self.statusValues(for: .antigravity)
-            : nil
-        let codexUnread = self.unreadTasks.count(for: .codex)
-        let claudeUnread = self.unreadTasks.count(for: .claude)
-        let layout = StatusLabelRenderer.layout(
-            codexToday: codex.today,
-            codexWeekly: codex.weekly,
-            codexUnreadCount: codexUnread,
-            claudeToday: claude?.today,
-            claudeWeekly: claude?.weekly,
-            claudeUnreadCount: claudeUnread,
-            grokToday: grok?.today,
-            grokWeekly: grok?.weekly,
-            antigravityToday: antigravity?.today,
-            antigravityWeekly: antigravity?.weekly)
+        var toolTips: [String] = []
+        let contents = self.visibleScopes.map { scope in
+            let platform = scope.platform
+            let snapshot = self.model.activitySnapshot
+            let quota = self.model.quotaState(for: platform).value
+            let top = StatusBarMetricPresentation(
+                metric: self.settings.statusBarTopMetric, snapshot: snapshot, quota: quota, platform: platform)
+            let bottom = StatusBarMetricPresentation(
+                metric: self.settings.statusBarBottomMetric, snapshot: snapshot, quota: quota, platform: platform)
+            let points = self.settings.showsStatusBarSpeedChart
+                ? SpeedTrendPresentation(snapshot: snapshot, platform: platform, limit: 30).points
+                : nil
+            let unread = self.unreadTasks.count(for: platform)
+            var details = [top.detailText, bottom.detailText].compactMap { $0 }
+            if let points {
+                details.append("速率曲线：最近最多30轮·逐轮采样，当前 \(points.count) 个有效样本（tok/s）")
+                details.append(points.isEmpty
+                    ? "等待速度样本"
+                    : "按轮次顺序等距连接；统计输出与推理 token，按模型请求计时")
+            }
+            let name = switch scope {
+            case .codex: "Codex"
+            case .claude: "Claude Code"
+            case .grok: "Grok Build"
+            case .antigravity: "Antigravity"
+            }
+            toolTips.append(name + (details.isEmpty ? "" : " · " + details.joined(separator: " · "))
+                + Self.unreadStatusText(unread).toolTip)
+            return StatusBarPlatformContent(
+                scope: scope, top: top.compactText, bottom: bottom.compactText,
+                unreadCount: unread, trendRates: points?.map(\.tokensPerSecond))
+        }
+        self.statusBarContents = contents
+        let layout = StatusLabelRenderer.layout(contents: contents)
         self.statusLabelLayout = layout
         button.image = layout.image
-
-        let codexUnreadText = Self.unreadStatusText(codexUnread)
-        var toolTips = [
-            "Codex · Today: \(codex.today) tokens · Weekly: \(codex.weekly) left\(codexUnreadText.toolTip)",
-        ]
-        var accessibilityLabels = [
-            "Codex. Today, \(codex.today) tokens. Weekly quota, \(codex.weekly) remaining.\(codexUnreadText.accessibility)",
-        ]
-        if let claude {
-            let claudeUnreadText = Self.unreadStatusText(claudeUnread)
-            toolTips.append(
-                "Claude Code · Today: \(claude.today) tokens · Weekly: \(claude.weekly) left\(claudeUnreadText.toolTip)")
-            accessibilityLabels.append(
-                "Claude Code. Today, \(claude.today) tokens. Weekly quota, \(claude.weekly) remaining.\(claudeUnreadText.accessibility)")
-        }
-        if let grok {
-            toolTips.append(
-                "Grok Build · Today: \(grok.today) tokens · Weekly: \(grok.weekly) left")
-            accessibilityLabels.append(
-                "Grok Build. Today, \(grok.today) tokens. Weekly quota, \(grok.weekly) remaining.")
-        }
-        if let antigravity {
-            toolTips.append(
-                "Antigravity · Today: \(antigravity.today) tokens · Weekly: \(antigravity.weekly) left")
-            accessibilityLabels.append(
-                "Antigravity. Today, \(antigravity.today) tokens. Weekly quota, \(antigravity.weekly) remaining.")
-        }
         button.toolTip = toolTips.joined(separator: "\n")
-        button.setAccessibilityLabel(accessibilityLabels.joined(separator: " "))
+        button.setAccessibilityLabel(toolTips.joined(separator: "。"))
     }
 
     private static func unreadStatusText(_ count: Int) -> (toolTip: String, accessibility: String) {
         guard count > 0 else { return ("", "") }
         return (
-            " · Unread: \(count)",
-            " \(count) unread completed \(count == 1 ? "task" : "tasks").")
-    }
-
-    private func statusValues(for platform: TokenPlatform) -> (today: String, weekly: String) {
-        let today = self.model.activitySnapshot?
-            .scoped(to: platform).today.tokens.total.statusBarCompactCount ?? "—"
-        let weekly: String = {
-            guard let window = self.model.quotaState(for: platform).value?.weekly,
-                  window.usageKnown
-            else {
-                return "—"
-            }
-            return "\(Int(window.remainingPercent.clamped(to: 0 ... 100).rounded()))%"
-        }()
-        return (today, weekly)
+            " · 待阅：\(count)",
+            " 已完成待阅任务 \(count) 个。")
     }
 
     func celebrationOriginPoint(for platform: TokenPlatform) -> CGPoint? {
@@ -419,15 +412,28 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             _ = self.settings.usesWeekdayWeeklyPacing
             _ = self.settings.showsFullRequestContentOnHover
             _ = self.settings.monitorsCodexMemory
+            _ = self.settings.dashboardSectionOrder
+            _ = self.settings.hiddenDashboardSections
+            _ = self.settings.statusBarTopMetric
+            _ = self.settings.statusBarBottomMetric
+            _ = self.settings.showsStatusBarSpeedChart
             _ = self.settings.syncEnabled
             _ = self.settings.syncServerURL
             _ = self.settings.syncDeviceName
             _ = self.settings.syncDeviceID
             _ = self.activitySync.configurationRevision
+            _ = self.pricingStore.revision
         } onChange: { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
                 self.observeSettings()
+                if self.pricingRevision != self.pricingStore.revision {
+                    self.pricingRevision = self.pricingStore.revision
+                    self.resetSessionHistory()
+                    Task { @MainActor [weak self] in
+                        await self?.model.restartActivityRefresh()
+                    }
+                }
                 let syncSettingsSignature = SyncSettingsSignature(
                     self.settings,
                     activitySync: self.activitySync)
@@ -498,23 +504,36 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private func updateOverviewHeight() {
-        self.overviewHost?.updateHeight(self.overviewHeight(for: self.model.scope))
+        self.updateSummaryHeights(for: self.model.scope)
     }
 
-    private func overviewHeight(for scope: DashboardScope) -> CGFloat {
-        DashboardOverviewView.contentHeight(
-            quota: self.model.quotaState(for: scope.platform).value,
-            providesQuota: self.model.providesQuota(for: scope.platform))
+    private var mergesWeeklyUsageIntoQuota: Bool {
+        self.settings.isDashboardSectionVisible(.quota)
+            && self.settings.isDashboardSectionVisible(.weeklyReset)
+    }
+
+    private func updateSummaryHeights(for scope: DashboardScope) {
+        let quota = self.model.quotaState(for: scope.platform).value
+        for (section, host) in self.summaryHosts {
+            host.updateHeight(DashboardSectionContentView.preferredHeight(
+                for: section,
+                quota: quota,
+                showsResetCredits: false,
+                showsWeeklyUsage: section == .quota && self.mergesWeeklyUsageIntoQuota))
+        }
+        self.summaryItems[.quota]?.isHidden = !self.model.providesQuota(for: scope.platform)
+        self.summaryItems[.weeklyReset]?.isHidden = !self.model.providesQuota(for: scope.platform)
+        self.updateResetCreditsItem(for: scope)
     }
 
     private func selectScope(_ scope: DashboardScope) {
         guard scope != self.model.scope else { return }
-        let window = self.overviewHost?.window
+        let window = self.rootMenu.items.first?.view?.window
         window?.disableScreenUpdatesUntilFlush()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             context.allowsImplicitAnimation = false
-            self.overviewHost?.updateHeight(self.overviewHeight(for: scope))
+            self.updateSummaryHeights(for: scope)
             self.updateMemoryVisibility(scope: scope)
             self.updateSessionProjectionAndVisibility(scope: scope)
             self.updateActivitySessionProjectionAndVisibility(scope: scope)
@@ -535,7 +554,6 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.renderedSessions.removeAll()
         self.renderedMenuScope = nil
         self.sessionExpansionItem = nil
-        self.sessionExpansionView = nil
         self.sessionEmptyItem = nil
         self.activityDetailItem = nil
         self.activitySessionMenu = nil
@@ -546,7 +564,11 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.activitySessionExpansionView = nil
         self.activitySessionEmptyItem = nil
         self.memoryItem = nil
-        self.overviewHost = nil
+        self.summaryHosts.removeAll()
+        self.summaryItems.removeAll()
+        self.resetCreditsItem = nil
+        self.resetCreditsHost = nil
+        self.resetCreditsContext = nil
         self.submenuSessions.removeAll()
 
         let accentColor = self.settings.theme.color
@@ -576,42 +598,211 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         headerItem.isEnabled = true
         self.rootMenu.addItem(headerItem)
 
-        let overviewHeight = self.overviewHeight(for: self.model.scope)
-        let overview = DashboardOverviewContentView(
-            model: self.model,
-            usesWeekdayWeeklyPacing: self.settings.usesWeekdayWeeklyPacing,
-            accentColor: accentColor)
-            .frame(width: Self.menuWidth, alignment: .top)
-        let overviewHost = FixedMenuHostingView(
-            rootView: AnyView(overview),
-            width: Self.menuWidth,
-            height: overviewHeight)
-        self.overviewHost = overviewHost
-        let overviewItem = NSMenuItem()
-        overviewItem.view = overviewHost
-        overviewItem.isEnabled = true
-        self.rootMenu.addItem(overviewItem)
+        for section in self.settings.visibleDashboardSections
+            where section != .weeklyReset || !self.mergesWeeklyUsageIntoQuota
+        {
+            self.addDashboardSection(section, accentColor: accentColor)
+        }
+        self.updateSummaryHeights(for: self.model.scope)
+        self.rootMenu.addItem(.separator())
 
+        let refresh = NSMenuItem(title: "立即刷新", action: nil, keyEquivalent: "")
+        let refreshView = PersistentMenuActionRowView(
+            width: Self.menuWidth,
+            title: "立即刷新",
+            systemImageName: "arrow.clockwise",
+            shortcut: "⌘R",
+            accessibilityHelp: "在当前菜单中刷新。快捷键 ⌘R。")
+        refreshView.onActivate = { [weak self] in
+            self?.refreshNow()
+        }
+        refresh.view = refreshView
+        refresh.isEnabled = true
+        refresh.toolTip = "在当前菜单中刷新（⌘R）"
+        self.rootMenu.addItem(refresh)
+
+        let settings = NSMenuItem(
+            title: "设置…",
+            action: #selector(self.showSettings),
+            keyEquivalent: ",")
+        settings.target = self
+        settings.keyEquivalentModifierMask = [.command]
+        settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
+        self.rootMenu.addItem(settings)
+
+        let quit = NSMenuItem(title: "退出 TokenBar", action: #selector(self.quit), keyEquivalent: "q")
+        quit.target = self
+        quit.keyEquivalentModifierMask = [.command]
+        self.rootMenu.addItem(quit)
+    }
+
+    private static func sectionIdentifier(_ section: TokenBarDashboardSection) -> NSUserInterfaceItemIdentifier {
+        NSUserInterfaceItemIdentifier("dashboard." + section.rawValue)
+    }
+
+    private func addDashboardSection(_ section: TokenBarDashboardSection, accentColor: Color) {
+        switch section {
+        case .speed, .quota, .today, .weeklyReset:
+            let height = DashboardSectionContentView.preferredHeight(
+                for: section,
+                quota: self.model.quotaState(for: self.model.scope.platform).value,
+                showsResetCredits: false,
+                showsWeeklyUsage: section == .quota && self.mergesWeeklyUsageIntoQuota)
+            let content = DashboardSectionContentView(
+                section: section,
+                model: self.model,
+                usesWeekdayWeeklyPacing: self.settings.usesWeekdayWeeklyPacing,
+                accentColor: accentColor,
+                showsResetCredits: false,
+                showsWeeklyUsage: section == .quota && self.mergesWeeklyUsageIntoQuota)
+                .frame(width: Self.menuWidth, alignment: .top)
+            let host = FixedMenuHostingView(
+                rootView: AnyView(content),
+                width: Self.menuWidth,
+                height: height)
+            let item = NSMenuItem(title: section.displayName, action: nil, keyEquivalent: "")
+            item.identifier = Self.sectionIdentifier(section)
+            item.view = host
+            item.isEnabled = true
+            self.summaryHosts[section] = host
+            self.summaryItems[section] = item
+            self.rootMenu.addItem(item)
+            if section == .quota {
+                self.addResetCreditsItem()
+            }
+        case .activity:
+            self.addActivitySection(accentColor: accentColor)
+        case .memory:
+            self.addMemorySection(accentColor: accentColor)
+        case .recentSessions:
+            self.rootMenu.addItem(.separator())
+            let header = NSMenuItem.sectionHeader(title: section.displayName)
+            header.identifier = Self.sectionIdentifier(section)
+            self.rootMenu.addItem(header)
+            self.addSessionItems()
+        }
+    }
+
+    private func addResetCreditsItem() {
+        let host = FixedMenuHostingView(
+            rootView: AnyView(EmptyView()),
+            width: Self.menuWidth,
+            height: ResetCreditsMenuRowView.preferredHeight)
+        let item = NSMenuItem(title: "额外重置", action: nil, keyEquivalent: "")
+        item.identifier = NSUserInterfaceItemIdentifier("dashboard.quota.resetCredits")
+        item.view = host
+        item.isEnabled = true
+        item.isHidden = true
+        item.toolTip = "点击或悬停查看全部额外重置记录"
+        self.resetCreditsHost = host
+        self.resetCreditsItem = item
+        self.rootMenu.addItem(item)
+    }
+
+    private func updateResetCreditsItem(for scope: DashboardScope) {
+        guard let item = self.resetCreditsItem else { return }
+        guard self.model.providesQuota(for: scope.platform),
+              let quota = self.model.quotaState(for: scope.platform).value,
+              let snapshot = quota.resetCredits
+        else {
+            item.isHidden = true
+            item.submenu = nil
+            item.representedObject = nil
+            self.resetCreditsContext = nil
+            return
+        }
+        item.isHidden = false
+        let context = ResetCreditsMenuContext(platform: scope.platform, snapshot: snapshot, sampledAt: quota.updatedAt)
+        guard self.resetCreditsContext != context || item.submenu == nil else { return }
+        self.resetCreditsContext = context
+        item.representedObject = snapshot
+        self.resetCreditsHost?.rootView = AnyView(
+            ResetCreditsMenuRowView(snapshot: snapshot)
+                .allowsHitTesting(false))
+        item.submenu = self.makeResetCreditsDetailMenu(
+            snapshot: snapshot,
+            sampledAt: quota.updatedAt,
+            reusing: item.submenu as? TokenBarMenu)
+    }
+
+    private func makeResetCreditsDetailMenu(
+        snapshot: QuotaResetCreditsSnapshot,
+        sampledAt: Date,
+        reusing existing: TokenBarMenu? = nil) -> TokenBarMenu
+    {
+        let menu = existing ?? TokenBarMenu(title: "额外重置")
+        menu.removeAllItems()
+        menu.autoenablesItems = false
+        menu.minimumWidth = ResetCreditsDetailView.preferredWidth
+        menu.delegate = self
+        menu.persistentActionDelegate = self
+        menu.addItem(self.resetCreditsDetailItem(
+            title: "额外重置 · \(ResetCreditsDetailPresentation.countText(snapshot))",
+            content: ResetCreditsDetailHeaderView(snapshot: snapshot),
+            height: ResetCreditsDetailHeaderView.preferredHeight(for: snapshot)))
+        menu.addItem(.separator())
+        if snapshot.credits.isEmpty {
+            menu.addItem(self.resetCreditsDetailItem(
+                title: ResetCreditsDetailPresentation.emptyText(snapshot),
+                content: ResetCreditsDetailEmptyView(snapshot: snapshot),
+                height: ResetCreditsDetailEmptyView.preferredHeight))
+        } else {
+            for (index, credit) in snapshot.credits.enumerated() {
+                let entry = self.resetCreditsDetailItem(
+                    title: ResetCreditsDetailPresentation.title(for: credit, index: index, sampledAt: sampledAt),
+                    content: ResetCreditDetailEntryView(credit: credit, index: index, sampledAt: sampledAt),
+                    height: ResetCreditDetailEntryView.preferredHeight)
+                entry.identifier = NSUserInterfaceItemIdentifier("resetCredit.\(index)")
+                entry.representedObject = credit
+                entry.toolTip = "服务端状态：\(credit.status)\n\(ResetCreditsDetailPresentation.expirationText(for: credit))"
+                menu.addItem(entry)
+            }
+        }
+        menu.addItem(.separator())
+        menu.addItem(self.resetCreditsDetailItem(
+            title: "采样：\(ResetCreditsDetailPresentation.timestampText(sampledAt))",
+            content: ResetCreditsDetailFooterView(sampledAt: sampledAt),
+            height: ResetCreditsDetailFooterView.preferredHeight))
+        return menu
+    }
+
+    private func resetCreditsDetailItem<Content: View>(
+        title: String,
+        content: Content,
+        height: CGFloat) -> NSMenuItem
+    {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.view = FixedMenuHostingView(
+            rootView: AnyView(content.allowsHitTesting(false)),
+            width: ResetCreditsDetailView.preferredWidth,
+            height: height)
+        return item
+    }
+
+    private func addActivitySection(accentColor: Color) {
         let activityHeight = ActivitySummarySection.preferredHeight + 1
         let activity = MenuActivitySummaryView(
             model: self.model,
             accentColor: accentColor)
-        .allowsHitTesting(false)
         .frame(width: Self.menuWidth, height: activityHeight, alignment: .top)
         let activityHost = FixedMenuHostingView(
             rootView: AnyView(activity),
             width: Self.menuWidth,
             height: activityHeight)
         let activityItem = NSMenuItem(
-            title: "Activity",
+            title: "使用记录",
             action: #selector(self.activityNoOp),
             keyEquivalent: "")
+        activityItem.identifier = Self.sectionIdentifier(.activity)
         activityItem.target = self
         activityItem.isEnabled = true
         activityItem.view = activityHost
         activityItem.submenu = self.makeActivityDetailMenu(accentColor: accentColor)
         self.rootMenu.addItem(activityItem)
+    }
 
+    private func addMemorySection(accentColor: Color) {
         if self.settings.monitorsCodexMemory {
             let memoryHeight = MemorySummarySection.preferredHeight + 1
             let memory = MenuMemorySummaryView(
@@ -625,9 +816,10 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 width: Self.menuWidth,
                 height: memoryHeight)
             let memoryItem = NSMenuItem(
-                title: "Codex Memory",
+                title: "Codex 记忆",
                 action: #selector(self.activityNoOp),
                 keyEquivalent: "")
+            memoryItem.identifier = Self.sectionIdentifier(.memory)
             memoryItem.target = self
             memoryItem.isEnabled = true
             memoryItem.view = memoryHost
@@ -636,46 +828,12 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             self.memoryItem = memoryItem
             self.rootMenu.addItem(memoryItem)
         }
-        self.rootMenu.addItem(.separator())
-
-        self.rootMenu.addItem(.sectionHeader(title: "Recent Sessions"))
-        self.addSessionItems()
-        self.rootMenu.addItem(.separator())
-
-        let refresh = NSMenuItem(title: "Refresh Now", action: nil, keyEquivalent: "")
-        let refreshView = PersistentMenuActionRowView(
-            width: Self.menuWidth,
-            title: "Refresh Now",
-            systemImageName: "arrow.clockwise",
-            shortcut: "⌘R",
-            accessibilityHelp: "Refresh without closing the menu. Command-R.")
-        refreshView.onActivate = { [weak self] in
-            self?.refreshNow()
-        }
-        refresh.view = refreshView
-        refresh.isEnabled = true
-        refresh.toolTip = "Refresh without closing the menu (⌘R)"
-        self.rootMenu.addItem(refresh)
-
-        let settings = NSMenuItem(
-            title: "Settings…",
-            action: #selector(self.showSettings),
-            keyEquivalent: ",")
-        settings.target = self
-        settings.keyEquivalentModifierMask = [.command]
-        settings.image = NSImage(systemSymbolName: "gearshape", accessibilityDescription: nil)
-        self.rootMenu.addItem(settings)
-
-        let quit = NSMenuItem(title: "Quit TokenBar", action: #selector(self.quit), keyEquivalent: "q")
-        quit.target = self
-        quit.keyEquivalentModifierMask = [.command]
-        self.rootMenu.addItem(quit)
     }
 
     private func addSessionItems() {
         let sessions = self.model.activitySnapshot?
             .sessionMenu(limit: nil).visibleSessions ?? []
-        let empty = NSMenuItem(title: "No sessions today", action: nil, keyEquivalent: "")
+        let empty = NSMenuItem(title: "今日会话待生成", action: nil, keyEquivalent: "")
         empty.isEnabled = false
         empty.isHidden = !sessions.isEmpty
         self.sessionEmptyItem = empty
@@ -693,49 +851,23 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             self.rootMenu.addItem(item)
         }
 
-        let expansion = PersistentMenuActionRowView(
-            width: Self.menuWidth,
-            title: "Show More…",
-            systemImageName: "chevron.down",
-            accessibilityHelp: "Expand or collapse recent sessions without closing the menu.")
-        expansion.onActivate = { [weak self] in
-            self?.toggleSessionExpansion()
-        }
-        let expansionItem = NSMenuItem(title: "Show More…", action: nil, keyEquivalent: "")
+        let expansionItem = NSMenuItem(title: "更多会话", action: nil, keyEquivalent: "")
         expansionItem.isEnabled = true
         expansionItem.isHidden = true
-        expansionItem.view = expansion
+        let overflow = TokenBarMenu(title: "更多会话")
+        overflow.autoenablesItems = false
+        overflow.minimumWidth = Self.menuWidth
+        overflow.delegate = self
+        overflow.persistentActionDelegate = self
+        expansionItem.submenu = overflow
         self.sessionExpansionItem = expansionItem
-        self.sessionExpansionView = expansion
         self.rootMenu.addItem(expansionItem)
         self.updateSessionProjectionAndVisibility()
     }
 
-    private func toggleSessionExpansion() {
-        guard let projection = self.renderedSessionProjection else { return }
-        self.showsAllSessions.toggle()
-        for (index, item) in self.sessionItems.enumerated() {
-            item.isHidden = index >= projection.ids.count
-                || (!self.showsAllSessions && index >= projection.collapsedLimit)
-        }
-        let title = self.sessionExpansionTitle(projection: projection)
-        self.sessionExpansionItem?.title = title
-        self.sessionExpansionView?.configure(
-            title: title,
-            systemImageName: self.showsAllSessions ? "chevron.up" : "chevron.down",
-            accessibilityHelp: "Expand or collapse recent sessions without closing the menu.")
-    }
-
-    private func sessionExpansionTitle(projection: RenderedSessionProjection) -> String {
-        if self.showsAllSessions {
-            return "Show Recent \(projection.collapsedLimit)"
-        }
-        return "Show \(max(0, projection.ids.count - projection.collapsedLimit)) More…"
-    }
-
     private func makeActivityDetailMenu(accentColor: Color) -> TokenBarMenu {
         self.normalizeSelectedSessionDate()
-        let menu = TokenBarMenu(title: "Activity Detail")
+        let menu = TokenBarMenu(title: "使用记录详情")
         menu.autoenablesItems = false
         menu.minimumWidth = ActivityDetailView.preferredWidth
         menu.delegate = self
@@ -758,7 +890,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             width: ActivityDetailView.preferredWidth,
             height: ActivityDetailView.preferredHeight)
         let item = NSMenuItem(
-            title: "Activity Detail",
+            title: "使用记录详情",
             action: #selector(self.activityNoOp),
             keyEquivalent: "")
         item.target = self
@@ -779,7 +911,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private func addActivitySessionItems(to menu: TokenBarMenu) {
-        let empty = NSMenuItem(title: "No sessions", action: nil, keyEquivalent: "")
+        let empty = NSMenuItem(title: "会话待生成", action: nil, keyEquivalent: "")
         empty.isEnabled = false
         self.activitySessionEmptyItem = empty
         menu.addItem(empty)
@@ -801,13 +933,13 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
 
         let expansion = PersistentMenuActionRowView(
             width: Self.menuWidth,
-            title: "Show More…",
+            title: "显示更多…",
             systemImageName: "chevron.down",
-            accessibilityHelp: "Expand or collapse sessions for the selected Activity date without closing the menu.")
+            accessibilityHelp: "在当前菜单中展开或收起所选日期的会话。")
         expansion.onActivate = { [weak self] in
             self?.toggleActivitySessionExpansion()
         }
-        let expansionItem = NSMenuItem(title: "Show More…", action: nil, keyEquivalent: "")
+        let expansionItem = NSMenuItem(title: "显示更多…", action: nil, keyEquivalent: "")
         expansionItem.isEnabled = true
         expansionItem.isHidden = true
         expansionItem.view = expansion
@@ -831,20 +963,20 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.activitySessionExpansionView?.configure(
             title: title,
             systemImageName: self.showsAllActivitySessions ? "chevron.up" : "chevron.down",
-            accessibilityHelp: "Expand or collapse sessions for the selected Activity date without closing the menu.")
+            accessibilityHelp: "在当前菜单中展开或收起所选日期的会话。")
     }
 
     private func activitySessionExpansionTitle(
         projection: RenderedSessionProjection) -> String
     {
         if self.showsAllActivitySessions {
-            return "Show First \(projection.collapsedLimit)"
+            return "显示前 \(projection.collapsedLimit) 个"
         }
-        return "Show \(max(0, projection.ids.count - projection.collapsedLimit)) More…"
+        return "再显示 \(max(0, projection.ids.count - projection.collapsedLimit)) 个…"
     }
 
     private func makeMemoryDetailMenu(accentColor: Color) -> TokenBarMenu {
-        let menu = TokenBarMenu(title: "Codex Memory")
+        let menu = TokenBarMenu(title: "Codex 记忆")
         menu.autoenablesItems = false
         menu.minimumWidth = MemoryDetailView.preferredWidth
         menu.delegate = self
@@ -863,7 +995,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             width: MemoryDetailView.preferredWidth,
             height: MemoryDetailView.preferredHeight)
         let item = NSMenuItem(
-            title: "Codex Memory",
+            title: "Codex 记忆",
             action: #selector(self.activityNoOp),
             keyEquivalent: "")
         item.target = self
@@ -874,7 +1006,9 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private func updateMemoryVisibility(scope: DashboardScope) {
-        let isHidden = !self.settings.monitorsCodexMemory || !scope.supportsCodexMemory
+        let isHidden = !self.settings.monitorsCodexMemory
+            || !self.settings.isDashboardSectionVisible(.memory)
+            || !scope.supportsCodexMemory
         if self.memoryItem?.isHidden != isHidden {
             self.memoryItem?.isHidden = isHidden
         }
@@ -882,13 +1016,13 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
 
     private func makeSessionItem() -> NSMenuItem {
         let item = NSMenuItem(
-            title: "Session",
+            title: "会话",
             action: #selector(self.openSession(_:)),
             keyEquivalent: "")
         item.target = self
         item.isEnabled = true
-        item.view = TokenMenuRowView(width: Self.menuWidth)
-        item.submenu = self.makeSessionSubmenu(title: "Session")
+        item.view = TokenMenuRowView(width: Self.menuWidth, compact: true)
+        item.submenu = self.makeSessionSubmenu(title: "会话")
         return item
     }
 
@@ -898,7 +1032,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         submenu.minimumWidth = Self.menuWidth
         submenu.delegate = self
         submenu.persistentActionDelegate = self
-        submenu.addItem(NSMenuItem(title: "Loading turns…", action: nil, keyEquivalent: ""))
+        submenu.addItem(NSMenuItem(title: "正在加载轮次…", action: nil, keyEquivalent: ""))
         return submenu
     }
 
@@ -942,24 +1076,25 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
 
     private func configureSessionItem(_ item: NSMenuItem, session: SessionSummary) {
         let title = session.menuDisplayTitle
-        let detail = session.menuDetail
+        let detail = session.tokens.total.compactCount
         let time = Date(timeIntervalSince1970: Double(session.endedAtMs) / 1000).menuClockText
         let isRemote = session.isSynchronizedRemote
         item.representedObject = session
         item.action = isRemote ? nil : #selector(self.openSession(_:))
 
-        let row = (item.view as? TokenMenuRowView) ?? TokenMenuRowView(width: Self.menuWidth)
+        let row = (item.view as? TokenMenuRowView) ?? TokenMenuRowView(width: Self.menuWidth, compact: true)
         row.configure(
             title: title,
             cost: session.menuCostText,
             detail: detail,
             trailing: time,
             showsChevron: true,
-            badge: session.menuServiceTierBadge)
+            badge: session.menuServiceTierBadge,
+            rate: nil)
         row.toolTip = isRemote
-            ? "\(title)\n\(detail)\nEnded \(time)\nSynced session (read-only) · Hover to inspect turns"
-            : "\(title)\n\(detail)\nEnded \(time)\nClick to open in "
-                + "\(session.platformID.displayName) · Hover to inspect turns"
+            ? "\(title)\n\(session.menuDetail)\n结束于 \(time)\n同步会话（仅查看）· 悬停查看轮次"
+            : "\(title)\n\(session.menuDetail)\n结束于 \(time)\n点击在 "
+                + "\(session.platformID.displayName) 中打开 · 悬停查看轮次"
         row.onActivate = isRemote ? nil : { [weak self, weak item] in
             guard let self else { return }
             item?.menu?.cancelTracking()
@@ -976,6 +1111,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private func updateSessionProjectionAndVisibility(scope: DashboardScope? = nil) {
+        guard self.sessionExpansionItem != nil else { return }
         let scope = scope ?? self.model.scope
         self.renderedMenuScope = scope
         let visibleSessions = self.model.activitySnapshot?
@@ -985,7 +1121,22 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         let projection = RenderedSessionProjection(
             ids: visibleSessions.map(\.platformScopedID),
             collapsedLimit: self.settings.recentSessionLimit)
+        let projectionChanged = self.renderedSessionProjection != projection
         self.renderedSessionProjection = projection
+        if projectionChanged, let overflow = self.sessionExpansionItem?.submenu {
+            for item in self.sessionItems {
+                item.menu?.removeItem(item)
+            }
+            let insertionIndex = self.sessionExpansionItem
+                .flatMap { self.rootMenu.items.firstIndex(of: $0) } ?? self.rootMenu.items.count
+            for (index, item) in self.sessionItems.enumerated() {
+                if index < projection.collapsedLimit {
+                    self.rootMenu.insertItem(item, at: insertionIndex + index)
+                } else {
+                    overflow.addItem(item)
+                }
+            }
+        }
         let sessionsChanged = self.renderedSessions != visibleSessions
 
         for (index, item) in self.sessionItems.enumerated() {
@@ -998,7 +1149,6 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 self.unbindSessionSubmenu(item)
             }
             let isHidden = index >= visibleSessions.count
-                || (!self.showsAllSessions && index >= projection.collapsedLimit)
             if item.isHidden != isHidden {
                 item.isHidden = isHidden
             }
@@ -1006,7 +1156,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.renderedSessions = visibleSessions
 
         let hasSessions = !projection.ids.isEmpty
-        let emptyTitle = "No \(scope.displayName) sessions today"
+        let emptyTitle = "今日 \(scope.displayName) 会话待生成"
         if self.sessionEmptyItem?.title != emptyTitle {
             self.sessionEmptyItem?.title = emptyTitle
         }
@@ -1015,18 +1165,9 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             self.sessionEmptyItem?.isHidden = hasSessions
         }
 
-        let canExpand = projection.ids.count > projection.collapsedLimit
-            && self.sessionItems.count > projection.collapsedLimit
-        if self.sessionExpansionItem?.isHidden != !canExpand {
-            self.sessionExpansionItem?.isHidden = !canExpand
-        }
-        guard canExpand else { return }
-        let title = self.sessionExpansionTitle(projection: projection)
-        self.sessionExpansionItem?.title = title
-        self.sessionExpansionView?.configure(
-            title: title,
-            systemImageName: self.showsAllSessions ? "chevron.up" : "chevron.down",
-            accessibilityHelp: "Expand or collapse recent sessions without closing the menu.")
+        let overflowCount = max(0, projection.ids.count - projection.collapsedLimit)
+        self.sessionExpansionItem?.isHidden = overflowCount == 0
+        self.sessionExpansionItem?.title = "更多会话（\(overflowCount)）"
     }
 
     private var availableSessionDates: [String] {
@@ -1082,27 +1223,27 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private var activitySessionHeaderTitle: String {
-        guard let selectedSessionDate else { return "Sessions" }
+        guard let selectedSessionDate else { return "会话" }
         if selectedSessionDate == self.latestSessionDate {
-            return "Sessions · Today"
+            return "会话 · 今日"
         }
-        return "Sessions · \(selectedSessionDate)"
+        return "会话 · \(selectedSessionDate)"
     }
 
     private func activitySessionEmptyTitle(scope: DashboardScope) -> String {
         guard let selectedSessionDate else {
-            return "No \(scope.displayName) session dates available"
+            return "\(scope.displayName) 会话日期待加载"
         }
         if self.loadingSessionHistoryKey == self.selectedSessionHistoryKey {
-            return "Loading \(scope.displayName) sessions for \(selectedSessionDate)…"
+            return "正在加载 \(selectedSessionDate) 的 \(scope.displayName) 会话…"
         }
         if self.selectedSessionHistoryError != nil {
-            return "Couldn’t load \(scope.displayName) sessions for \(selectedSessionDate)"
+            return "加载 \(selectedSessionDate) 的 \(scope.displayName) 会话时出错"
         }
         if selectedSessionDate == self.latestSessionDate {
-            return "No \(scope.displayName) sessions today"
+            return "今日 \(scope.displayName) 会话待生成"
         }
-        return "No \(scope.displayName) sessions on \(selectedSessionDate)"
+        return "\(selectedSessionDate) 的 \(scope.displayName) 会话为空"
     }
 
     private func updateActivitySessionProjectionAndVisibility(
@@ -1158,7 +1299,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.activitySessionExpansionView?.configure(
             title: title,
             systemImageName: self.showsAllActivitySessions ? "chevron.up" : "chevron.down",
-            accessibilityHelp: "Expand or collapse sessions for the selected Activity date without closing the menu.")
+            accessibilityHelp: "在当前菜单中展开或收起所选日期的会话。")
     }
 
     private func ensureSessionItemCapacity(_ count: Int) {
@@ -1209,6 +1350,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         force: Bool = false,
         debounce: Bool = false)
     {
+        guard self.activitySessionMenu != nil else { return }
         self.normalizeSelectedSessionDate()
         guard let selectedSessionDate,
               selectedSessionDate != self.latestSessionDate,
@@ -1247,10 +1389,10 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             } catch is CancellationError {
                 return
             } catch {
-                guard self.loadingSessionHistoryKey == key else { return }
+                guard !Task.isCancelled, self.loadingSessionHistoryKey == key else { return }
                 self.sessionHistoryErrors[key] = error.localizedDescription
             }
-            guard self.loadingSessionHistoryKey == key else { return }
+            guard !Task.isCancelled, self.loadingSessionHistoryKey == key else { return }
             self.loadingSessionHistoryKey = nil
             self.sessionHistoryTask = nil
             self.updateActivitySessionProjectionAndVisibility()
@@ -1266,6 +1408,27 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     #if DEBUG
+    func statusBarPresentationForTesting() -> (contents: [StatusBarPlatformContent], toolTip: String?, accessibility: String?) {
+        (self.statusBarContents, self.statusItem.button?.toolTip, self.statusItem.button?.accessibilityLabel())
+    }
+
+    func rootMenuForTesting() -> NSMenu {
+        self.rootMenu
+    }
+
+    func rebuildRootMenuForTesting() {
+        self.rebuildRootMenu()
+    }
+
+    func visibleDashboardSectionsForTesting() -> [TokenBarDashboardSection] {
+        self.rootMenu.items.compactMap { item in
+            guard !item.isHidden, let identifier = item.identifier?.rawValue,
+                  identifier.hasPrefix("dashboard.")
+            else { return nil }
+            return TokenBarDashboardSection(rawValue: String(identifier.dropFirst("dashboard.".count)))
+        }
+    }
+
     func selectScopeForTesting(_ scope: DashboardScope) {
         self.selectScope(scope)
     }
@@ -1315,17 +1478,17 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
 
         menu.title = session.menuDisplayTitle
         menu.minimumWidth = Self.menuWidth
-        menu.addItem(.sectionHeader(title: "Turns"))
+        menu.addItem(.sectionHeader(title: "轮次"))
         if session.isSynchronizedRemote {
             let readOnly = NSMenuItem(
-                title: "Synced session · Read-only on this Mac",
+                title: "同步会话 · 在本机查看",
                 action: nil,
                 keyEquivalent: "")
             readOnly.isEnabled = false
             menu.addItem(readOnly)
         }
         let copySession = NSMenuItem(
-            title: "Copy Session",
+            title: "复制会话",
             action: #selector(self.copySession(_:)),
             keyEquivalent: "")
         copySession.target = self
@@ -1343,7 +1506,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             return $0.id < $1.id
         }
         if requests.isEmpty {
-            let empty = NSMenuItem(title: "No turns", action: nil, keyEquivalent: "")
+            let empty = NSMenuItem(title: "轮次待生成", action: nil, keyEquivalent: "")
             empty.isEnabled = false
             menu.addItem(empty)
             return
@@ -1364,7 +1527,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             }
             return $0.id < $1.id
         }
-        let item = NSMenuItem(title: "Turn", action: nil, keyEquivalent: "")
+        let item = NSMenuItem(title: "轮次", action: nil, keyEquivalent: "")
         item.isEnabled = true
         let isRemote = turn.isSynchronizedRemote
 
@@ -1372,23 +1535,25 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         row.configure(
             title: turn.menuRowTitle,
             cost: turn.menuCostText,
-            detail: turn.menuDetail,
+            detail: [turn.tokens.requestMenuDetail, turn.menuTTFTText]
+                .compactMap { $0 }.joined(separator: " · "),
             trailing: "\(turn.startedAt.menuClockText) · \(turn.menuDurationText)",
             showsChevron: physicalRequests.count > 1
                 || (self.settings.showsFullRequestContentOnHover && !isRemote),
-            badge: turn.menuServiceTierBadge)
+            badge: turn.menuServiceTierBadge,
+            rate: turn.menuAverageTPSText)
         item.view = row
 
         if physicalRequests.count > 1 {
             item.toolTip = isRemote
-                ? "Synced turn (read-only) · Hover to inspect contributing requests"
-                : "Hover to inspect the requests contributing to this turn"
+                ? "同步轮次（仅查看）· 悬停查看相关请求"
+                : "悬停查看本轮相关请求"
             item.submenu = self.makeAgentRequestMenu(
                 title: turn.menuTitle,
                 requests: physicalRequests)
         } else if let request = physicalRequests.first {
             if isRemote {
-                item.toolTip = "Synced request details are not uploaded"
+                item.toolTip = "同步内容仅包含请求统计"
             } else {
                 self.configureCopyInteraction(item: item, row: row, request: request)
             }
@@ -1408,23 +1573,25 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         menu.minimumWidth = Self.menuWidth
         menu.delegate = self
         menu.persistentActionDelegate = self
-        menu.addItem(.sectionHeader(title: "Agent Requests"))
+        menu.addItem(.sectionHeader(title: "智能体请求"))
 
         for request in requests {
-            let item = NSMenuItem(title: "Agent Request", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: "智能体请求", action: nil, keyEquivalent: "")
             item.isEnabled = true
             let row = TokenMenuRowView(width: Self.menuWidth)
             row.configure(
                 title: request.agentRequestMenuTitle,
                 cost: request.menuCostText,
-                detail: request.menuDetail,
+                detail: [request.tokens.requestMenuDetail, request.menuTTFTText]
+                    .compactMap { $0 }.joined(separator: " · "),
                 trailing: "\(request.startedAt.menuClockText) · \(request.menuDurationText)",
                 showsChevron: self.settings.showsFullRequestContentOnHover
                     && !request.isSynchronizedRemote,
-                badge: request.menuServiceTierBadge)
+                badge: request.menuServiceTierBadge,
+                rate: request.menuAverageTPSText)
             item.view = row
             if request.isSynchronizedRemote {
-                item.toolTip = "Synced request details are not uploaded"
+                item.toolTip = "同步内容仅包含请求统计"
             } else {
                 self.configureCopyInteraction(item: item, row: row, request: request)
             }
@@ -1446,7 +1613,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         item.target = self
         item.action = #selector(self.copyRequest(_:))
         item.representedObject = request
-        item.toolTip = "Click to copy the Tokscale request locator"
+        item.toolTip = "点击复制 Tokscale 请求定位信息"
         row.onActivate = { [weak self, weak item] in
             guard let item else { return }
             self?.copyRequest(item)
@@ -1456,7 +1623,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private func makeRequestDetailMenu(for request: RequestSummary) -> TokenBarMenu {
-        let menu = TokenBarMenu(title: "Request Details")
+        let menu = TokenBarMenu(title: "请求详情")
         menu.autoenablesItems = false
         menu.minimumWidth = RequestDetailMenuView.preferredWidth
         menu.delegate = self
@@ -1467,7 +1634,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             promptPreview: request.promptPreview,
             outputPreview: request.outputPreview)
         let detailItem = NSMenuItem(
-            title: "Request Details",
+            title: "请求详情",
             action: #selector(self.requestDetailNoOp),
             keyEquivalent: "")
         detailItem.target = self
@@ -1475,9 +1642,16 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         detailItem.view = detailView
         menu.addItem(detailItem)
 
-        self.requestDetailMenus[ObjectIdentifier(menu)] = RequestDetailMenuContext(
-            request: request,
-            view: detailView)
+        let menuID = ObjectIdentifier(menu)
+        self.requestDetailMenus[menuID] = RequestDetailMenuContext(request: request, view: detailView)
+        detailView.onRetry = { [weak self, weak detailView] in
+            guard let self, let context = self.requestDetailMenus[menuID],
+                  self.requestDetailTasks[menuID] == nil else { return }
+            self.requestDetailCache.removeValue(forKey: context.cacheKey)
+            self.requestDetailCacheOrder.removeAll { $0 == context.cacheKey }
+            detailView?.showLoading(promptPreview: request.promptPreview, outputPreview: request.outputPreview)
+            self.loadRequestDetailIfNeeded(menuID: menuID)
+        }
         return menu
     }
 
@@ -1528,6 +1702,9 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private func cacheRequestDetail(_ detail: RequestDetail, forKey key: String) {
+        // An empty read can become available later; keep it eligible for a new read.
+        guard detail.prompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              detail.output?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return }
         if self.requestDetailCache[key] == nil {
             self.requestDetailCacheOrder.append(key)
         }
@@ -1590,9 +1767,9 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "Couldn’t Open Session"
+            alert.messageText = "打开会话时出错"
             alert.informativeText = error.localizedDescription
-            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: "确定")
             alert.runModal()
         }
     }
@@ -1674,7 +1851,9 @@ private struct MenuActivitySummaryView: View {
             ActivitySummarySection(
                 state: self.model.visibleActivity,
                 accentColor: self.accentColor,
-                showsChevron: true)
+                showsChevron: true,
+                model: self.model,
+                platform: self.model.scope.platform)
         }
     }
 }
@@ -1725,8 +1904,45 @@ struct StatusLabelLayout {
     }
 }
 
+struct StatusBarPlatformContent: Equatable, Sendable {
+    let scope: DashboardScope
+    let top: String?
+    let bottom: String?
+    let unreadCount: Int
+    /// nil hides the chart; an empty array draws the explicit empty indicator.
+    let trendRates: [Double]?
+
+    init(scope: DashboardScope, top: String?, bottom: String?, unreadCount: Int = 0, trendRates: [Double]? = nil) {
+        self.scope = scope
+        self.top = top
+        self.bottom = bottom
+        self.unreadCount = unreadCount
+        self.trendRates = trendRates
+    }
+}
+
+enum StatusSpeedChartGeometry {
+    static func points(rates: [Double], in rect: NSRect) -> [NSPoint] {
+        let values = Array(rates.filter { $0.isFinite && $0 > 0 }.suffix(30))
+        guard let peak = values.max() else { return [] }
+        return values.enumerated().map { index, rate in
+            NSPoint(
+                x: values.count == 1 ? rect.midX : rect.minX + CGFloat(index) / CGFloat(values.count - 1) * rect.width,
+                y: rect.minY + CGFloat(rate / peak) * rect.height)
+        }
+    }
+}
+
 @MainActor
 enum StatusLabelRenderer {
+    struct Geometry {
+        let size: NSSize
+        let iconRect: NSRect?
+        let chartRect: NSRect?
+        let topRect: NSRect?
+        let bottomRect: NSRect?
+    }
+
     static func layout(
         codexToday: String,
         codexWeekly: String,
@@ -1739,127 +1955,157 @@ enum StatusLabelRenderer {
         antigravityToday: String? = nil,
         antigravityWeekly: String? = nil) -> StatusLabelLayout
     {
-        var values: [(scope: DashboardScope, today: String, weekly: String, unreadCount: Int)] = [
-            (.codex, codexToday, codexWeekly, codexUnreadCount),
-        ]
+        var contents = [StatusBarPlatformContent(
+            scope: .codex, top: codexToday, bottom: codexWeekly, unreadCount: codexUnreadCount)]
         if let claudeToday, let claudeWeekly {
-            values.append((.claude, claudeToday, claudeWeekly, claudeUnreadCount))
+            contents.append(StatusBarPlatformContent(
+                scope: .claude, top: claudeToday, bottom: claudeWeekly, unreadCount: claudeUnreadCount))
         }
         if let grokToday, let grokWeekly {
-            values.append((.grok, grokToday, grokWeekly, 0))
+            contents.append(StatusBarPlatformContent(scope: .grok, top: grokToday, bottom: grokWeekly))
         }
         if let antigravityToday, let antigravityWeekly {
-            values.append((.antigravity, antigravityToday, antigravityWeekly, 0))
+            contents.append(StatusBarPlatformContent(scope: .antigravity, top: antigravityToday, bottom: antigravityWeekly))
         }
-        let images = values.map { value in
-            self.image(
-                platform: value.scope.platform,
-                today: value.today,
-                weekly: value.weekly,
-                unreadCount: value.unreadCount)
+        return self.layout(contents: contents)
+    }
+
+    static func layout(contents: [StatusBarPlatformContent]) -> StatusLabelLayout {
+        let contents = contents.isEmpty ? [StatusBarPlatformContent(scope: .codex, top: nil, bottom: nil)] : contents
+        let images = contents.map { content in
+            self.image(platform: content.scope.platform, top: content.top, bottom: content.bottom,
+                       unreadCount: content.unreadCount, trendRates: content.trendRates)
         }
         let gap: CGFloat = 7
-        let size = NSSize(
-            width: images.map(\.size.width).reduce(0, +)
-                + gap * CGFloat(max(0, images.count - 1)),
-            height: images.map(\.size.height).max() ?? 20)
+        let size = NSSize(width: images.map(\.size.width).reduce(0, +) + gap * CGFloat(max(0, images.count - 1)), height: 20)
         let image = NSImage(size: size, flipped: false) { _ in
-            var imageX: CGFloat = 0
+            var x: CGFloat = 0
             for providerImage in images {
-                providerImage.draw(
-                    in: NSRect(
-                        x: imageX,
-                        y: floor((size.height - providerImage.size.height) / 2),
-                        width: providerImage.size.width,
-                        height: providerImage.size.height),
-                    from: .zero,
-                    operation: .sourceOver,
-                    fraction: 1)
-                imageX += providerImage.size.width + gap
+                providerImage.draw(in: NSRect(x: x, y: 0, width: providerImage.size.width, height: 20),
+                                   from: .zero, operation: .sourceOver, fraction: 1)
+                x += providerImage.size.width + gap
             }
             return true
         }
         image.isTemplate = true
         var regions: [StatusLabelLayout.Region] = []
-        var imageX: CGFloat = 0
-        for (index, value) in values.enumerated() {
-            let providerImage = images[index]
+        var x: CGFloat = 0
+        for (index, content) in contents.enumerated() {
             regions.append(StatusLabelLayout.Region(
-                scope: value.scope,
-                startX: index == 0 ? 0 : imageX - gap / 2,
-                centerX: imageX + providerImage.size.width / 2))
-            imageX += providerImage.size.width + gap
+                scope: content.scope, startX: index == 0 ? 0 : x - gap / 2,
+                centerX: x + images[index].size.width / 2))
+            x += images[index].size.width + gap
         }
         return StatusLabelLayout(image: image, regions: regions)
     }
 
-    static func image(
-        platform: TokenPlatform? = nil,
-        today: String,
-        weekly: String,
-        unreadCount: Int = 0) -> NSImage
-    {
-        let topValue = today as NSString
-        let bottomValue = weekly as NSString
-        let baseAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold),
-            .foregroundColor: NSColor.black,
-        ]
+    static func image(platform: TokenPlatform? = nil, today: String, weekly: String, unreadCount: Int = 0) -> NSImage {
+        self.image(platform: platform, top: today, bottom: weekly, unreadCount: unreadCount)
+    }
 
-        let valueWidth = ceil(max(
-            topValue.size(withAttributes: baseAttributes).width,
-            bottomValue.size(withAttributes: baseAttributes).width))
-        let platformIcon = platform.flatMap { platform in
-            PlatformStatusIcon.image(for: platform)
-        }
-        let iconWidth: CGFloat = platformIcon == nil ? 0 : 15
-        let iconGap: CGFloat = platformIcon == nil ? 0 : 4
-        let badge = platformIcon != nil && unreadCount > 0 ? StatusUnreadBadge(count: unreadCount) : nil
-        let contentWidth = iconWidth + iconGap + valueWidth
+    static func geometry(platform: TokenPlatform?, top: String?, bottom: String?, showsTrend: Bool) -> Geometry {
+        let top = self.visibleText(top)
+        let bottom = self.visibleText(bottom)
+        let attributes = self.textAttributes
+        let width = min(54, ceil(max(
+            top.map { ($0 as NSString).size(withAttributes: attributes).width } ?? 0,
+            bottom.map { ($0 as NSString).size(withAttributes: attributes).width } ?? 0)))
+        let hasIcon = platform.flatMap { PlatformStatusIcon.image(for: $0) } != nil
+        let widths: [CGFloat] = [hasIcon ? 15 : 0, showsTrend ? 34 : 0, width].filter { $0 > 0 }
+        let contentWidth = widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) * 4
         let size = NSSize(width: max(30, contentWidth + 4), height: 20)
-        let contentX = floor((size.width - contentWidth) / 2)
-        let textX = contentX + iconWidth + iconGap
+        let start = floor((size.width - contentWidth) / 2)
+        var x = start
+        let iconRect: NSRect? = hasIcon ? NSRect(x: x, y: 2, width: 15, height: 15) : nil
+        if hasIcon { x += 15 }
+        var chartRect: NSRect?
+        if showsTrend {
+            if x > start { x += 4 }
+            chartRect = NSRect(x: x, y: 3, width: 34, height: 14)
+            x += 34
+        }
+        if width > 0, x > start { x += 4 }
+        let singleRow = top == nil || bottom == nil
+        return Geometry(
+            size: size, iconRect: iconRect, chartRect: chartRect,
+            topRect: top == nil ? nil : NSRect(x: x, y: singleRow ? 5 : 10, width: width, height: 10),
+            bottomRect: bottom == nil ? nil : NSRect(x: x, y: singleRow ? 5 : 0, width: width, height: 10))
+    }
 
-        let valueParagraph = NSMutableParagraphStyle()
-        valueParagraph.alignment = .left
-        var valueAttributes = baseAttributes
-        valueAttributes[.paragraphStyle] = valueParagraph
-
-        let image = NSImage(size: size, flipped: false) { _ in
-            if let platformIcon {
-                let iconRect = NSRect(
-                    x: contentX,
-                    y: floor((size.height - iconWidth) / 2),
-                    width: iconWidth,
-                    height: iconWidth)
-                platformIcon.draw(
-                    in: iconRect,
-                    from: .zero,
-                    operation: .sourceOver,
-                    fraction: 1)
+    static func image(
+        platform: TokenPlatform? = nil, top: String?, bottom: String?, unreadCount: Int = 0,
+        trendRates: [Double]? = nil) -> NSImage
+    {
+        let geometry = self.geometry(platform: platform, top: top, bottom: bottom, showsTrend: trendRates != nil)
+        let icon = platform.flatMap { PlatformStatusIcon.image(for: $0) }
+        let badge = icon != nil && unreadCount > 0 ? StatusUnreadBadge(count: unreadCount) : nil
+        let top = self.visibleText(top)
+        let bottom = self.visibleText(bottom)
+        let attributes = self.textAttributes
+        let image = NSImage(size: geometry.size, flipped: false) { _ in
+            if let icon, let rect = geometry.iconRect {
+                icon.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
                 if let badge {
                     badge.draw(in: NSRect(
-                        x: iconRect.maxX + StatusUnreadBadge.iconOverhang - badge.width,
-                        y: size.height - StatusUnreadBadge.height,
-                        width: badge.width,
-                        height: StatusUnreadBadge.height))
+                        x: rect.maxX + StatusUnreadBadge.iconOverhang - badge.width,
+                        y: geometry.size.height - StatusUnreadBadge.height,
+                        width: badge.width, height: StatusUnreadBadge.height))
                 }
             }
-            let valueRect = NSRect(x: textX, y: 0, width: valueWidth, height: 10)
-            topValue.draw(
-                in: valueRect.offsetBy(dx: 0, dy: 10),
-                withAttributes: valueAttributes)
-            bottomValue.draw(in: valueRect, withAttributes: valueAttributes)
+            if let rates = trendRates, let rect = geometry.chartRect {
+                self.drawTrend(rates: rates, in: rect)
+            }
+            if let top, let rect = geometry.topRect { (top as NSString).draw(in: rect, withAttributes: attributes) }
+            if let bottom, let rect = geometry.bottomRect { (bottom as NSString).draw(in: rect, withAttributes: attributes) }
             return true
         }
         image.isTemplate = true
         return image
     }
+
+    private static var textAttributes: [NSAttributedString.Key: Any] {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .left
+        paragraph.lineBreakMode = .byTruncatingTail
+        return [.font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold),
+                .foregroundColor: NSColor.black, .paragraphStyle: paragraph]
+    }
+
+    private static func visibleText(_ value: String?) -> String? {
+        value.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+    }
+
+    private static func drawTrend(rates: [Double], in rect: NSRect) {
+        let points = StatusSpeedChartGeometry.points(rates: rates, in: rect.insetBy(dx: 1.5, dy: 1.5))
+        guard let first = points.first else {
+            let dash = "—" as NSString
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 8), .foregroundColor: NSColor.black.withAlphaComponent(0.45)]
+            let size = dash.size(withAttributes: attributes)
+            dash.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attributes)
+            return
+        }
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+        if points.count > 1 {
+            let line = NSBezierPath()
+            line.lineWidth = 1.1
+            line.lineCapStyle = .round
+            line.lineJoinStyle = .round
+            line.move(to: first)
+            for point in points.dropFirst() { line.line(to: point) }
+            line.stroke()
+        }
+        let last = points.last ?? first
+        let diameter: CGFloat = points.count == 1 ? 2.6 : 2.2
+        NSBezierPath(ovalIn: NSRect(x: last.x - diameter / 2, y: last.y - diameter / 2,
+                                  width: diameter, height: diameter)).fill()
+    }
 }
 
 /// Unread count drawn as a pill over a provider icon's top-right corner. The ring
 /// and digits are knocked out so the count stays legible in template images.
-/// Longer counts grow leftward over the icon, so the status label keeps its width.
+/// Longer counts growward over the icon, so the status label keeps its width.
 private struct StatusUnreadBadge {
     static let height: CGFloat = 9
     /// How far the pill reaches past the icon into the 4pt gap; its 1pt ring still

@@ -123,13 +123,13 @@ final class LoginItemController {
     var detail: String {
         switch self.status {
         case .notRegistered:
-            "TokenBar opens only when you launch it."
+            "TokenBar 当前通过手动启动打开。"
         case .enabled:
-            "TokenBar opens automatically after you sign in."
+            "TokenBar 会在登录后自动打开。"
         case .requiresApproval:
-            "Approve TokenBar in System Settings to finish enabling this login item."
+            "请在系统设置中批准 TokenBar，以完成登录项启用。"
         case .unavailable:
-            "Open the packaged TokenBar.app to configure launch at login."
+            "打开打包后的 TokenBar.app，即可配置登录时启动。"
         }
     }
 
@@ -147,8 +147,8 @@ final class LoginItemController {
             self.status = self.service.status
         } catch {
             self.status = self.service.status
-            let action = isEnabled ? "enable" : "disable"
-            self.errorMessage = "Could not \(action) launch at login: \(error.localizedDescription)"
+            let action = isEnabled ? "启用" : "关闭"
+            self.errorMessage = "\(action)登录时启动功能时出错：\(error.localizedDescription)"
         }
     }
 

@@ -23,15 +23,15 @@ public enum ProcessRunnerError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case let .executableNotFound(path):
-            "Executable not found: \(path)"
+            "可执行文件定位失败：\(path)"
         case let .launchFailed(message):
-            "Could not launch process: \(message)"
+            "进程启动失败：\(message)"
         case let .timedOut(timeout):
-            "Process timed out after \(timeout) seconds."
+            "进程在 \(timeout) 秒后超时。"
         case let .outputTooLarge(stream, limitBytes):
-            "Process \(stream) exceeded the \(limitBytes)-byte capture limit."
+            "进程的 \(stream) 超出 \(limitBytes) 字节的采集上限。"
         case let .nonZeroExit(code, stderr):
-            stderr.isEmpty ? "Process exited with status \(code)." : "Process exited with status \(code): \(stderr)"
+            stderr.isEmpty ? "进程已退出，状态码为 \(code)。" : "进程已退出，状态码为 \(code)：\(stderr)"
         }
     }
 }

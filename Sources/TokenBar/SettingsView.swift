@@ -9,6 +9,10 @@ struct TokenBarSettingsView: View {
     let activitySync: ActivitySyncController?
     let syncNow: () -> Void
     let testResetAnimation: () -> Void
+    let pricingStore: ModelPricingStore
+    let priceQuoteService: (any ModelPriceQuoting)?
+    let observedPricingModels: [ObservedPricingModel]
+    @State private var showsModelPricing = false
 
     init(
         settings: TokenBarSettings,
@@ -16,7 +20,10 @@ struct TokenBarSettingsView: View {
         memoryTelemetry: MemoryTelemetryController? = nil,
         activitySync: ActivitySyncController? = nil,
         syncNow: @escaping () -> Void = {},
-        testResetAnimation: @escaping () -> Void = {})
+        testResetAnimation: @escaping () -> Void = {},
+        pricingStore: ModelPricingStore = .shared,
+        priceQuoteService: (any ModelPriceQuoting)? = nil,
+        observedPricingModels: [ObservedPricingModel] = [])
     {
         self.settings = settings
         self.loginItem = loginItem
@@ -24,12 +31,15 @@ struct TokenBarSettingsView: View {
         self.activitySync = activitySync
         self.syncNow = syncNow
         self.testResetAnimation = testResetAnimation
+        self.pricingStore = pricingStore
+        self.priceQuoteService = priceQuoteService
+        self.observedPricingModels = observedPricingModels
     }
 
     var body: some View {
         Form {
-            Section("Appearance") {
-                Picker("Theme color", selection: self.$settings.theme) {
+            Section("外观") {
+                Picker("主题颜色", selection: self.$settings.theme) {
                     ForEach(TokenBarTheme.allCases) { theme in
                         Label {
                             Text(theme.displayName)
@@ -43,9 +53,9 @@ struct TokenBarSettingsView: View {
                 }
             }
 
-            Section("Startup") {
+            Section("启动") {
                 Toggle(
-                    "Launch TokenBar at login",
+                    "登录时启动 TokenBar",
                     isOn: Binding(
                         get: { self.loginItem.isEnabled },
                         set: { self.loginItem.setEnabled($0) }))
@@ -56,7 +66,7 @@ struct TokenBarSettingsView: View {
                     .foregroundStyle(.secondary)
 
                 if self.loginItem.requiresApproval {
-                    Button("Open Login Items") {
+                    Button("打开登录项设置") {
                         self.loginItem.openSystemSettings()
                     }
                 }
@@ -68,66 +78,98 @@ struct TokenBarSettingsView: View {
                 }
             }
 
-            Section("Platforms") {
-                Toggle("Show Claude Code", isOn: self.$settings.showsClaude)
-                Toggle("Show Grok Build", isOn: self.$settings.showsGrok)
-                Toggle("Show Antigravity", isOn: self.$settings.showsAntigravity)
+            Section("平台") {
+                Toggle("显示 Claude Code", isOn: self.$settings.showsClaude)
+                Toggle("显示 Grok Build", isOn: self.$settings.showsGrok)
+                Toggle("显示 Antigravity", isOn: self.$settings.showsAntigravity)
 
-                Text("Adds each provider's T/W section and dashboard tab. Changes take effect immediately.")
+                Text("显示各平台的今日／每周区域及仪表盘标签页。更改立即生效。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Activity") {
-                Picker("Statistics timezone", selection: self.$settings.statisticsTimeZone) {
+            Section("菜单栏显示") {
+                Picker("上行", selection: self.$settings.statusBarTopMetric) {
+                    ForEach(TokenBarStatusMetric.allCases) { metric in
+                        Text(metric.displayName).tag(metric)
+                    }
+                }
+
+                Picker("下行", selection: self.$settings.statusBarBottomMetric) {
+                    ForEach(TokenBarStatusMetric.allCases) { metric in
+                        Text(metric.displayName).tag(metric)
+                    }
+                }
+
+                Toggle("显示速率折线图", isOn: self.$settings.showsStatusBarSpeedChart)
+
+                Text("折线图展示最近最多 30 轮有效速率样本，并随刷新更新。上下行均可选择隐藏。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            self.dashboardLayoutSection
+
+            Section("模型价格") {
+                Text("自动价格来源：官方价格表、OpenRouter、内置备用价。已启用的自定义规则优先使用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Button("管理模型单价…") {
+                    self.showsModelPricing = true
+                }
+            }
+
+            Section("使用记录") {
+                Picker("统计时区", selection: self.$settings.statisticsTimeZone) {
                     ForEach(TokenBarStatisticsTimeZone.allCases) { timeZone in
                         Text(timeZone.displayName).tag(timeZone)
                     }
                 }
 
-                Text("UTC aligns today and daily totals with the Codex usage dashboard.")
+                Text("使用 UTC 可使今日及每日总量与 Codex 用量仪表盘保持一致。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Picker("Recent sessions", selection: self.$settings.recentSessionCount) {
+                Picker("主菜单最近会话上限", selection: self.$settings.recentSessionCount) {
                     ForEach(TokenBarRecentSessionCount.allCases) { count in
                         Text("\(count.rawValue)").tag(count)
                     }
                 }
 
                 Toggle(
-                    "Show full request content on hover",
+                    "悬停时显示完整请求内容",
                     isOn: self.$settings.showsFullRequestContentOnHover)
             }
 
-            Section("Quota") {
+            Section("额度") {
                 Toggle(
-                    "Use weekdays only for weekly pace",
+                    "按工作日计算每周使用进度",
                     isOn: self.$settings.usesWeekdayWeeklyPacing)
 
-                Text("Splits weekly pace into five workdays. Saturday and Sunday do not advance expected usage.")
+                Text("将每周使用进度分配至五个工作日。周六和周日维持预期用量。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             if let activitySync = self.activitySync {
-                Section("Multi-device sync") {
-                    Toggle("Sync activity across devices", isOn: self.$settings.syncEnabled)
+                Section("多设备同步") {
+                    Toggle("跨设备同步使用记录", isOn: self.$settings.syncEnabled)
 
                     TextField(
-                        "Server URL",
+                        "服务器 URL",
                         text: self.$settings.syncServerURL,
                         prompt: Text("https://sync.example.com"))
 
                     SecureField(
-                        "Device access token",
+                        "设备访问令牌",
                         text: Binding(
                             get: { activitySync.token },
                             set: { activitySync.token = $0 }))
 
-                    TextField("Device name", text: self.$settings.syncDeviceName)
+                    TextField("设备名称", text: self.$settings.syncDeviceName)
 
-                    LabeledContent("Device ID") {
+                    LabeledContent("设备 ID") {
                         Text(self.settings.syncDeviceID)
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
@@ -140,7 +182,7 @@ struct TokenBarSettingsView: View {
                             .frame(width: 7, height: 7)
                         Text(self.syncStatusTitle(activitySync.report))
                         Spacer()
-                        Button("Sync Now") {
+                        Button("立即同步") {
                             self.syncNow()
                         }
                         .disabled(
@@ -162,24 +204,24 @@ struct TokenBarSettingsView: View {
                                     : Color.red)
                     }
 
-                    Text("Uploads session names and IDs with token counts, models, and timing so synced sessions can be identified and copied. Prompt/output text, workspace details, absolute paths, and provider credentials are removed before transmission. Sync failures never replace local activity data.")
+                    Text("上传会话名称、ID、token 数量、模型及时间信息，便于识别和复制已同步的会话。传输前会移除提示词与输出正文、工作区详情、绝对路径及平台凭据。同步出错时保留本地使用记录。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
 
             if let memoryTelemetry = self.memoryTelemetry {
-                Section("Codex Memory") {
+                Section("Codex 记忆") {
                     Toggle(
-                        "Monitor Codex Memory usage",
+                        "监测 Codex 记忆用量",
                         isOn: self.$settings.monitorsCodexMemory)
 
-                    Text("When off, TokenBar stops its local receiver, hides Memory usage, and excludes Memory telemetry from multi-device sync. This does not change Codex's memory setting.")
+                    Text("关闭后，TokenBar 会停止本地接收器、隐藏记忆用量，并将记忆遥测数据从多设备同步中移除。Codex 的记忆设置保持原样。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     if self.settings.monitorsCodexMemory {
-                        LabeledContent("Receiver") {
+                        LabeledContent("接收器") {
                             HStack(spacing: 6) {
                                 Circle()
                                     .fill(memoryTelemetry.receiverState.isListening ? Color.green : Color.orange)
@@ -192,7 +234,7 @@ struct TokenBarSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        LabeledContent("Codex config") {
+                        LabeledContent("Codex 配置") {
                             Text(memoryTelemetry.configurationState.title)
                         }
 
@@ -203,8 +245,8 @@ struct TokenBarSettingsView: View {
                         if memoryTelemetry.configurationState.canInstall {
                             Button(
                                 memoryTelemetry.configurationState == .needsAnalytics
-                                    ? "Enable Codex Analytics"
-                                    : "Enable Memory Metrics")
+                                    ? "启用 Codex 分析"
+                                    : "启用记忆指标")
                             {
                                 memoryTelemetry.installConfiguration()
                             }
@@ -216,23 +258,27 @@ struct TokenBarSettingsView: View {
                                 .foregroundStyle(.red)
                         }
 
-                        Text("Codex loads this setting when its local process starts. Restart Codex or ChatGPT once after enabling. Logs, traces, and prompt text stay disabled.")
+                        Text("Codex 在本地进程启动时加载此设置。启用后请重启一次 Codex 或 ChatGPT。日志、调用追踪及提示词正文仍保持关闭。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
 
-            Section("Updates") {
-                Picker("Refresh in background", selection: self.$settings.refreshInterval) {
+            Section("更新") {
+                Picker("后台刷新间隔", selection: self.$settings.refreshInterval) {
                     ForEach(TokenBarRefreshInterval.allCases) { interval in
                         Text(interval.displayName).tag(interval)
                     }
                 }
+
+                Text("控制本地用量刷新；每轮完成后等待所选间隔。额度自动查询最短间隔为 60 秒。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            Section("Celebrations") {
-                LabeledContent("Confetti when quota resets") {
+            Section("庆祝动画") {
+                LabeledContent("额度重置时显示彩纸") {
                     HStack(spacing: 8) {
                         Picker("", selection: self.$settings.resetCelebration) {
                             ForEach(TokenBarResetCelebration.allCases) { option in
@@ -241,20 +287,20 @@ struct TokenBarSettingsView: View {
                         }
                         .labelsHidden()
 
-                        Button("Test Animation") {
+                        Button("测试动画") {
                             self.testResetAnimation()
                         }
                     }
                 }
 
-                Text("Plays a click-through animation from the provider's menu bar section.")
+                Text("从平台对应的菜单栏区域播放动画，鼠标点击可穿透动画。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             HStack {
                 Spacer()
-                Button("Restore Defaults") {
+                Button("恢复默认设置") {
                     self.settings.resetToDefaults()
                     self.loginItem.setEnabled(false)
                 }
@@ -274,22 +320,81 @@ struct TokenBarSettingsView: View {
         { _ in
             self.loginItem.refresh()
         }
+        .sheet(isPresented: self.$showsModelPricing) {
+            ModelPricingSettingsView(
+                store: self.pricingStore,
+                quoteService: self.priceQuoteService,
+                observedModels: self.observedPricingModels)
+        }
+    }
+
+    private var dashboardLayoutSection: some View {
+        Section("菜单布局") {
+            Text("选择板块与顺序。重置以来的统计随额度合并显示。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(Array(self.settings.dashboardSectionOrder.enumerated()), id: \.element) { index, section in
+                self.dashboardLayoutRow(section, at: index)
+            }
+
+            Text("Codex 记忆板块在 Codex 平台且已启用记忆监测时显示；显示偏好与采集设置分别保存。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func dashboardLayoutRow(_ section: TokenBarDashboardSection, at index: Int) -> some View {
+        HStack(spacing: 10) {
+            Text("\(index + 1)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 16, alignment: .trailing)
+                .accessibilityHidden(true)
+
+            Toggle(
+                section.displayName,
+                isOn: Binding(
+                    get: { self.settings.isDashboardSectionVisible(section) },
+                    set: { self.settings.setDashboardSection(section, isVisible: $0) }))
+                .toggleStyle(.checkbox)
+                .accessibilityLabel("显示\(section.displayName)")
+                .accessibilityHint("排列第 \(index + 1) 位；按空格键切换显示状态")
+
+            Spacer(minLength: 8)
+
+            Button("上移\(section.displayName)", systemImage: "arrow.up") {
+                self.settings.moveDashboardSection(section, by: -1)
+            }
+            .labelStyle(.iconOnly)
+            .help("上移\(section.displayName)")
+            .accessibilityHint("按空格键向上移动一位")
+            .disabled(index == 0)
+
+            Button("下移\(section.displayName)", systemImage: "arrow.down") {
+                self.settings.moveDashboardSection(section, by: 1)
+            }
+            .labelStyle(.iconOnly)
+            .help("下移\(section.displayName)")
+            .accessibilityHint("按空格键向下移动一位")
+            .disabled(index == self.settings.dashboardSectionOrder.count - 1)
+        }
     }
 
     private func syncStatusTitle(_ report: ActivitySyncReport) -> String {
         switch self.syncDisplayPhase(report) {
         case .disabled:
-            "Disabled"
+            "已关闭"
         case .ready:
-            "Ready"
+            "就绪"
         case .syncing:
-            "Syncing…"
+            "正在同步…"
         case .success:
-            report.deviceCount == 1 ? "1 device synced" : "\(report.deviceCount) devices synced"
+            "已同步 \(report.deviceCount) 台设备"
         case .partial:
-            "Partial sync"
+            "部分同步完成"
         case .failure:
-            "Sync failed"
+            "同步出错"
         }
     }
 

@@ -30,7 +30,13 @@ public final class DashboardModel {
     public private(set) var quotas: [TokenPlatform: DashboardSourceState<QuotaSnapshot>]
     public private(set) var weeklyQuotaUsageHistories: [TokenPlatform: WeeklyQuotaUsageHistory] = [:]
     public private(set) var activity = DashboardSourceState<ActivitySnapshot>()
+    public private(set) var history = DashboardSourceState<ActivitySnapshot>()
+    public private(set) var historyRevision = 0
     public var scope: DashboardScope = .codex
+    @ObservationIgnored private var historyTask: Task<Void, Never>?
+    @ObservationIgnored private var historyLoadedAt: Date?
+    @ObservationIgnored private var historyDayKey: String?
+
 
     public var quota: DashboardSourceState<QuotaSnapshot> {
         self.quotaState(for: .codex)
@@ -177,6 +183,7 @@ public final class DashboardModel {
     }
 
     public func stop() {
+        self.invalidateHistory()
         self.isStarted = false
         self.quotaTimerTask?.cancel()
         self.quotaTimerTask = nil
@@ -204,6 +211,7 @@ public final class DashboardModel {
     public func updateStatisticsTimeZone(_ timeZone: TokenBarStatisticsTimeZone) -> Bool {
         guard self.statisticsTimeZone != timeZone else { return false }
         self.statisticsTimeZone = timeZone
+        self.invalidateHistory()
         return true
     }
 
@@ -363,6 +371,12 @@ public final class DashboardModel {
 
     public func weeklyQuotaUsage(for platform: TokenPlatform) -> WeeklyQuotaUsageHistory? {
         self.weeklyQuotaUsageHistories[platform]
+    }
+
+    public func weeklyQuotaDayBreakdown(for platform: TokenPlatform) -> WeeklyQuotaDayBreakdown {
+        WeeklyQuotaDayBreakdown(snapshot: self.quotaState(for: platform).value,
+            history: self.weeklyQuotaUsageHistories[platform], at: self.now(),
+            statisticsTimeZone: self.statisticsTimeZone)
     }
 
     public func weeklyQuotaUsageToday(for platform: TokenPlatform) -> WeeklyQuotaDailyUsage? {
@@ -613,11 +627,108 @@ public final class DashboardModel {
             statisticsTimeZone: self.statisticsTimeZone)
     }
 
+    public var historyTimeZone: TimeZone {
+        self.statisticsTimeZone == .utc ? TimeZone(secondsFromGMT: 0)! : .autoupdatingCurrent
+    }
+
+    public func invalidateHistory() {
+        self.historyRevision += 1
+        self.historyTask?.cancel()
+        self.historyTask = nil
+        self.historyLoadedAt = nil
+        self.historyDayKey = nil
+        self.history = DashboardSourceState()
+    }
+
+    /// Fetches the extended window only on demand; normal activity polling remains a 30-day scan.
+    public func loadHistoryIfNeeded() async {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = self.historyTimeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        let dayKey = formatter.string(from: self.now())
+        if let loadedAt = self.historyLoadedAt,
+           self.historyDayKey == dayKey,
+           Int(self.now().timeIntervalSince1970 / 300) == Int(loadedAt.timeIntervalSince1970 / 300) { return }
+        if let task = self.historyTask { await task.value; return }
+        let revision = self.historyRevision
+        let previous = self.history.value
+        let zone = self.statisticsTimeZone
+        let historyTimeZone = self.historyTimeZone
+        let requestedAt = self.now()
+        self.history = DashboardSourceState(value: self.history.value, isRefreshing: true)
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let snapshot = try await self.activityService.fetchHistory(days: previous == nil ? 366 : 30, endDate: dayKey, statisticsTimeZone: zone)
+                try Task.checkCancellation()
+                guard revision == self.historyRevision, zone == self.statisticsTimeZone else { return }
+                let combined = previous.map { Self.mergingHistory(previous: $0, recent: snapshot, at: requestedAt, timeZone: historyTimeZone) } ?? snapshot
+                self.history = DashboardSourceState(value: combined)
+                self.historyLoadedAt = self.now()
+                self.historyDayKey = dayKey
+            } catch {
+                guard revision == self.historyRevision else { return }
+                self.history = DashboardSourceState(value: self.history.value, errorMessage: error.localizedDescription)
+            }
+        }
+        self.historyTask = task
+        await task.value
+        if revision == self.historyRevision { self.historyTask = nil }
+    }
+
+    /// Replaces the complete recent window, including missing/removed days, while retaining older local months.
+    private static func mergingHistory(previous: ActivitySnapshot, recent: ActivitySnapshot, at date: Date, timeZone: TimeZone) -> ActivitySnapshot {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let today = calendar.startOfDay(for: date)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        let end = formatter.string(from: today)
+        let lower = formatter.string(from: calendar.date(byAdding: .day, value: -365, to: today)!)
+        let recentLower = formatter.string(from: calendar.date(byAdding: .day, value: -29, to: today)!)
+        func mergedDays(_ old: [DailySummary], _ new: [DailySummary]) -> [DailySummary] {
+            var days: [String: DailySummary] = [:]
+            for day in old where day.date >= lower && day.date < recentLower { days[day.date] = day }
+            for day in new where day.date >= recentLower && day.date <= end { days[day.date] = day }
+            return days.values.sorted { $0.date < $1.date }
+        }
+        func platformSources(_ snapshot: ActivitySnapshot) -> [TokenPlatform: ActivitySourceSnapshot] {
+            let sources = snapshot.sourceSnapshots.isEmpty
+                ? [ActivitySourceSnapshot(platform: .codex, today: snapshot.today, weeklySinceReset: snapshot.weeklySinceReset, days: snapshot.days)]
+                : snapshot.sourceSnapshots
+            return Dictionary(sources.map { ($0.platform, $0) }, uniquingKeysWith: { _, last in last })
+        }
+        let oldSources = platformSources(previous)
+        let newSources = platformSources(recent)
+        let platforms = Set(oldSources.keys).union(newSources.keys).sorted { $0.rawValue < $1.rawValue }
+        let sources = platforms.map { platform in
+            ActivitySourceSnapshot(
+                platform: platform, today: newSources[platform]?.today ?? .zero,
+                weeklySinceReset: newSources[platform]?.weeklySinceReset,
+                days: mergedDays(oldSources[platform]?.days ?? [], newSources[platform]?.days ?? []), rangeTotals: nil)
+        }
+        return ActivitySnapshot(
+            schemaVersion: recent.schemaVersion, generatedAtMs: recent.generatedAtMs, timezone: recent.timezone,
+            today: recent.today, sessions: recent.sessions, days: mergedDays(previous.days, recent.days),
+            weeklySinceReset: recent.weeklySinceReset, sources: sources.isEmpty ? nil : sources,
+            rangeTotals: nil, memoryUsage: recent.memoryUsage, pricingModels: recent.pricingModels)
+    }
+
+    /// Extended history is local-only, matching the extended provider contract.
+    /// Normal activity may contain synchronized devices and is deliberately kept separate.
+    public func historyDays(for platform: TokenPlatform?) -> [DailySummary] {
+        (self.history.value?.scoped(to: platform).days ?? []).sorted { $0.date < $1.date }
+    }
+
     public func refreshActivity() async {
         await self.startActivityRefresh(restarting: false)
     }
 
     public func restartActivityRefresh() async {
+        self.invalidateHistory()
         await self.startActivityRefresh(restarting: true)
     }
 

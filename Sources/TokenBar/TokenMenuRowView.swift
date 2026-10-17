@@ -8,23 +8,29 @@ protocol TokenMenuHighlighting: AnyObject {
 @MainActor
 final class TokenMenuRowView: NSView, TokenMenuHighlighting {
     static let rowHeight: CGFloat = 42
+    static let compactRowHeight: CGFloat = 26
 
     var onActivate: (() -> Void)?
 
     private let fixedWidth: CGFloat
+    private let compact: Bool
     private let titleField = NSTextField(labelWithString: "")
     private let badgeField = NSTextField(labelWithString: "")
     private let costField = NSTextField(labelWithString: "")
     private let detailField = NSTextField(labelWithString: "")
+    private let rateField = NSTextField(labelWithString: "")
     private let trailingField = NSTextField(labelWithString: "")
     private let chevronView = NSImageView()
     private var showsChevron = false
     private var isMenuHighlighted = false
     private var isPressed = false
 
-    init(width: CGFloat) {
+    init(width: CGFloat, compact: Bool = false) {
         self.fixedWidth = width
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.rowHeight))
+        self.compact = compact
+        super.init(frame: NSRect(
+            x: 0, y: 0, width: width,
+            height: compact ? Self.compactRowHeight : Self.rowHeight))
 
         self.autoresizingMask = [.width]
         self.configureLabel(
@@ -51,6 +57,11 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
             self.detailField,
             font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular))
         self.configureLabel(
+            self.rateField,
+            font: .monospacedDigitSystemFont(ofSize: 11.5, weight: .semibold))
+        self.rateField.alignment = .right
+        self.rateField.isHidden = true
+        self.configureLabel(
             self.trailingField,
             font: .monospacedDigitSystemFont(ofSize: 10.5, weight: .regular))
         self.trailingField.alignment = .right
@@ -65,6 +76,7 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
         self.addSubview(self.badgeField)
         self.addSubview(self.costField)
         self.addSubview(self.detailField)
+        self.addSubview(self.rateField)
         self.addSubview(self.trailingField)
         self.addSubview(self.chevronView)
         self.setAccessibilityElement(true)
@@ -80,7 +92,7 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
     override var allowsVibrancy: Bool { true }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: self.fixedWidth, height: Self.rowHeight)
+        NSSize(width: self.fixedWidth, height: self.compact ? Self.compactRowHeight : Self.rowHeight)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -101,6 +113,10 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
 
     override func layout() {
         super.layout()
+        if self.compact {
+            self.layoutCompactRow()
+            return
+        }
 
         let leading: CGFloat = 16
         let trailing: CGFloat = 14
@@ -168,6 +184,40 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
                 .font: self.costField.font ?? NSFont.systemFont(ofSize: 10.5),
             ]).width) + 8
             : 0
+        if !self.rateField.isHidden {
+            let lineWidth = max(0, availableRight - leading)
+            let measuredRateWidth = ceil(
+                (self.rateField.stringValue as NSString).size(withAttributes: [
+                    .font: self.rateField.font ?? NSFont.systemFont(ofSize: 11.5),
+                ]).width) + 6
+            let rateWidth = min(measuredRateWidth, lineWidth * 0.6)
+            let rateX = leading + lineWidth - rateWidth
+            self.rateField.frame = NSRect(
+                x: rateX,
+                y: 3,
+                width: rateWidth,
+                height: 17)
+
+            let rateGap = min(10, max(0, lineWidth - rateWidth))
+            let detailRight = rateX - rateGap
+            let infoWidth = max(0, detailRight - leading)
+            let costWidth = min(72, measuredCostWidth, infoWidth * 0.45)
+            self.costField.frame = NSRect(
+                x: leading,
+                y: 4,
+                width: costWidth,
+                height: 15)
+            let costGap = hasCost ? min(4, max(0, infoWidth - costWidth)) : 0
+            let detailX = leading + costWidth + costGap
+            self.detailField.frame = NSRect(
+                x: detailX,
+                y: 4,
+                width: max(0, detailRight - detailX),
+                height: 15)
+            return
+        }
+
+        self.rateField.frame = .zero
         let costWidth = min(72, measuredCostWidth)
         self.costField.frame = NSRect(
             x: leading,
@@ -228,21 +278,83 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
         detail: String,
         trailing: String,
         showsChevron: Bool,
-        badge: String? = nil)
+        badge: String? = nil,
+        rate: String? = nil)
     {
         self.titleField.stringValue = title
         self.badgeField.stringValue = badge ?? ""
         self.badgeField.isHidden = badge == nil
         self.costField.stringValue = cost ?? ""
-        self.costField.isHidden = cost == nil
+        self.costField.isHidden = self.compact || cost == nil
+        let trimmedRate = rate?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visibleRate = trimmedRate.flatMap { $0.isEmpty ? nil : $0 }
+        self.rateField.stringValue = visibleRate ?? ""
+        self.rateField.isHidden = self.compact || visibleRate == nil
+        self.costField.lineBreakMode = visibleRate == nil ? .byClipping : .byTruncatingTail
+        self.costField.cell?.truncatesLastVisibleLine = visibleRate != nil
         self.detailField.stringValue = cost == nil ? detail : "· \(detail)"
+        self.detailField.isHidden = self.compact
         self.trailingField.stringValue = trailing
         self.showsChevron = showsChevron
         self.chevronView.isHidden = !showsChevron
-        self.setAccessibilityLabel([title, badge].compactMap { $0 }.joined(separator: ", "))
+        self.setAccessibilityLabel(
+            [title, badge, visibleRate.map { "生成速率 \($0)" }]
+                .compactMap { $0 }
+                .joined(separator: ", "))
         let accessibleDetail = [cost, detail, trailing].compactMap { $0 }.joined(separator: ". ")
         self.setAccessibilityHelp(accessibleDetail)
         self.needsLayout = true
+    }
+
+    private func layoutCompactRow() {
+        let leading: CGFloat = 16
+        let trailing: CGFloat = 14
+        let chevronWidth: CGFloat = self.showsChevron ? 8 : 0
+        let chevronGap: CGFloat = self.showsChevron ? 10 : 0
+        let availableRight = max(leading, self.bounds.width - trailing - chevronWidth - chevronGap)
+        let lineWidth = availableRight - leading
+        self.chevronView.frame = NSRect(
+            x: max(leading, self.bounds.width - trailing - chevronWidth),
+            y: (self.bounds.height - 12) / 2,
+            width: chevronWidth, height: 12)
+
+        let measuredTrailingWidth = ceil(
+            (self.trailingField.stringValue as NSString).size(withAttributes: [
+                .font: self.trailingField.font ?? NSFont.systemFont(ofSize: 10.5),
+            ]).width) + 6
+        let trailingWidth = self.trailingField.stringValue.isEmpty
+            ? 0 : min(112, measuredTrailingWidth, lineWidth * 0.4)
+        let trailingX = availableRight - trailingWidth
+        self.trailingField.frame = NSRect(
+            x: trailingX, y: (self.bounds.height - 16) / 2,
+            width: trailingWidth, height: 16)
+
+        let titleAreaWidth = max(0, lineWidth - trailingWidth - (trailingWidth > 0 ? 8 : 0))
+        var titleWidth = titleAreaWidth
+        if self.badgeField.isHidden {
+            self.badgeField.frame = .zero
+        } else {
+            let measuredBadgeWidth = ceil(
+                (self.badgeField.stringValue as NSString).size(withAttributes: [
+                    .font: self.badgeField.font ?? NSFont.systemFont(ofSize: 8.5),
+                ]).width) + 14
+            let badgeWidth = min(50, measuredBadgeWidth, titleAreaWidth * 0.4)
+            let badgeGap = min(6, max(0, titleAreaWidth - badgeWidth))
+            let measuredTitleWidth = ceil(
+                (self.titleField.stringValue as NSString).size(withAttributes: [
+                    .font: self.titleField.font ?? NSFont.systemFont(ofSize: 12.5),
+                ]).width) + 6
+            titleWidth = min(measuredTitleWidth, max(0, titleAreaWidth - badgeWidth - badgeGap))
+            self.badgeField.frame = NSRect(
+                x: leading + titleWidth + badgeGap, y: (self.bounds.height - 13) / 2,
+                width: badgeWidth, height: 13)
+        }
+        self.titleField.frame = NSRect(
+            x: leading, y: (self.bounds.height - 17) / 2,
+            width: titleWidth, height: 17)
+        self.costField.frame = .zero
+        self.detailField.frame = .zero
+        self.rateField.frame = .zero
     }
 
     func setMenuHighlighted(_ highlighted: Bool) {
@@ -268,6 +380,7 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
             self.badgeField.layer?.borderColor = NSColor.selectedMenuItemTextColor.withAlphaComponent(0.28).cgColor
             self.costField.textColor = .selectedMenuItemTextColor
             self.detailField.textColor = .selectedMenuItemTextColor.withAlphaComponent(0.78)
+            self.rateField.textColor = .selectedMenuItemTextColor
             self.trailingField.textColor = .selectedMenuItemTextColor.withAlphaComponent(0.78)
             self.chevronView.contentTintColor = .selectedMenuItemTextColor
         } else {
@@ -278,6 +391,7 @@ final class TokenMenuRowView: NSView, TokenMenuHighlighting {
             self.badgeField.layer?.borderColor = badgeAccent.withAlphaComponent(0.26).cgColor
             self.costField.textColor = TokenBarVisualStyle.costAccentNSColor
             self.detailField.textColor = .secondaryLabelColor
+            self.rateField.textColor = .labelColor
             self.trailingField.textColor = .secondaryLabelColor
             self.chevronView.contentTintColor = .tertiaryLabelColor
         }

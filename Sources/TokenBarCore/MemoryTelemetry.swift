@@ -30,17 +30,17 @@ public enum MemoryReceiverState: Equatable, Sendable {
 
     public var title: String {
         switch self {
-        case .stopped: "Stopped"
-        case .starting: "Starting…"
-        case .listening: "Listening"
-        case .failed: "Unavailable"
+        case .stopped: "已停止"
+        case .starting: "启动中…"
+        case .listening: "监听中"
+        case .failed: "暂不可用"
         }
     }
 
     public var detail: String? {
         switch self {
-        case .stopped: "TokenBar is not receiving metrics."
-        case .starting: "Starting the loopback receiver."
+        case .stopped: "TokenBar 指标接收已停止。"
+        case .starting: "正在启动本地回环接收器。"
         case .listening: "127.0.0.1:4318"
         case let .failed(message): message
         }
@@ -61,24 +61,24 @@ public enum CodexMemoryConfigurationState: Equatable, Sendable {
 
     public var title: String {
         switch self {
-        case .notConfigured: "Not configured"
-        case .needsAnalytics: "Analytics disabled"
-        case .configured: "Configured"
-        case .customOpenTelemetry: "Custom OpenTelemetry"
-        case .unavailable: "Unavailable"
+        case .notConfigured: "待配置"
+        case .needsAnalytics: "分析已关闭"
+        case .configured: "已配置"
+        case .customOpenTelemetry: "自定义 OpenTelemetry"
+        case .unavailable: "暂不可用"
         }
     }
 
     public var detail: String {
         switch self {
         case .notConfigured:
-            "Enable metrics to start collecting from new Codex sessions."
+            "启用指标后，开始采集新建 Codex 会话的数据。"
         case .needsAnalytics:
-            "The TokenBar endpoint is present, but Codex metrics are disabled."
+            "已配置 TokenBar 接收端点，Codex 指标采集仍处于关闭状态。"
         case .configured:
-            "Restart Codex or ChatGPT once after enabling. New processes send only metrics to TokenBar."
+            "启用后重启一次 Codex 或 ChatGPT。新进程仅向 TokenBar 发送指标。"
         case .customOpenTelemetry:
-            "Existing [otel] settings were preserved. Configure the metrics endpoint manually."
+            "现有 [otel] 设置已保留。请手动配置指标接收端点。"
         case let .unavailable(message):
             message
         }
@@ -100,7 +100,7 @@ public enum CodexMemoryConfigurationError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .customOpenTelemetry:
-            "TokenBar did not modify the existing [otel] configuration."
+            "TokenBar 已保留现有 [otel] 配置。"
         case let .invalidConfiguration(message), let .fileOperation(message):
             message
         }
@@ -133,7 +133,7 @@ public struct CodexMemoryConfigurationService: Sendable {
             let content = try String(contentsOf: self.configurationURL, encoding: .utf8)
             return Self.inspect(content: content)
         } catch {
-            return .unavailable("Could not read Codex config: \(error.localizedDescription)")
+            return .unavailable("读取 Codex 配置失败：\(error.localizedDescription)")
         }
     }
 
@@ -146,7 +146,7 @@ public struct CodexMemoryConfigurationService: Sendable {
                 content = try String(contentsOf: self.configurationURL, encoding: .utf8)
             } catch {
                 throw CodexMemoryConfigurationError.fileOperation(
-                    "Could not read Codex config: \(error.localizedDescription)")
+                    "读取 Codex 配置失败：\(error.localizedDescription)")
             }
         } else {
             content = ""
@@ -203,14 +203,14 @@ public struct CodexMemoryConfigurationService: Sendable {
             }
         } catch {
             throw CodexMemoryConfigurationError.fileOperation(
-                "Could not update Codex config: \(error.localizedDescription)")
+                "更新 Codex 配置失败：\(error.localizedDescription)")
         }
     }
 
     static func inspect(content: String) -> CodexMemoryConfigurationState {
         let otelSections = Self.sectionRanges("otel", in: content)
         if otelSections.count > 1 {
-            return .unavailable("Codex config contains duplicate [otel] sections.")
+            return .unavailable("Codex 配置包含重复的 [otel] 节。")
         }
         guard let otel = otelSections.first else {
             if Self.hasRelatedDefinition("otel", in: content) {
@@ -235,11 +235,11 @@ public struct CodexMemoryConfigurationService: Sendable {
         }
         let analyticsSections = Self.sectionRanges("analytics", in: content)
         if analyticsSections.count > 1 {
-            return .unavailable("Codex config contains duplicate [analytics] sections.")
+            return .unavailable("Codex 配置包含重复的 [analytics] 节。")
         }
         guard let analytics = analyticsSections.first else {
             if Self.hasRelatedDefinition("analytics", in: content) {
-                return .unavailable("Codex config uses a custom analytics table that TokenBar will not modify.")
+                return .unavailable("Codex 配置使用了自定义 analytics 表，TokenBar 将保留该表。")
             }
             return .needsAnalytics
         }
@@ -253,12 +253,12 @@ public struct CodexMemoryConfigurationService: Sendable {
         let sections = Self.sectionRanges("analytics", in: content)
         guard sections.count <= 1 else {
             throw CodexMemoryConfigurationError.invalidConfiguration(
-                "Codex config contains duplicate [analytics] sections.")
+                "Codex 配置包含重复的 [analytics] 节。")
         }
         guard let section = sections.first else {
             guard !Self.hasRelatedDefinition("analytics", in: content) else {
                 throw CodexMemoryConfigurationError.invalidConfiguration(
-                    "Codex config uses a custom analytics table that TokenBar will not modify.")
+                    "Codex 配置使用了自定义 analytics 表，TokenBar 将保留该表。")
             }
             var updated = content
             if !updated.isEmpty, !updated.hasSuffix("\n") {
@@ -470,7 +470,7 @@ public final class MemoryTelemetryController {
                     try? await Task.sleep(for: .milliseconds(50))
                 }
                 if self.receiverProcess?.isRunning == true {
-                    self.receiverState = .failed("Receiver did not publish its startup status.")
+                    self.receiverState = .failed("接收器启动状态缺失。")
                 }
             }
         } catch {
@@ -524,7 +524,7 @@ public final class MemoryTelemetryController {
                     Date(timeIntervalSince1970: Double($0) / 1000)
                 } ?? Date())
         case "error":
-            self.receiverState = .failed(status.message ?? "Memory receiver failed to start.")
+            self.receiverState = .failed(status.message ?? "记忆指标接收器启动失败。")
         default:
             return false
         }
@@ -539,7 +539,7 @@ public final class MemoryTelemetryController {
         self.receiverLogHandle = nil
         guard !self.isStopping else { return }
         if !self.readReceiverStatus() || self.receiverState.isListening {
-            self.receiverState = .failed("Receiver exited with status \(exitCode).")
+            self.receiverState = .failed("接收器已退出，状态码为 \(exitCode)。")
         }
     }
 

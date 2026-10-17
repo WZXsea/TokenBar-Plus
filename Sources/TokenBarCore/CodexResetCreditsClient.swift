@@ -40,7 +40,7 @@ struct CodexResetCreditsClient: Sendable {
 
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        timeout: TimeInterval = 4,
+        timeout: TimeInterval = 15,
         transport: any TokenBarHTTPTransport = EphemeralHTTPTransport(),
         now: @escaping @Sendable () -> Date = Date.init)
     {
@@ -99,16 +99,17 @@ struct CodexResetCreditsClient: Sendable {
             throw CodexResetCreditsError.invalidResponse(error.localizedDescription)
         }
         guard payload.availableCount >= 0 else {
-            throw CodexResetCreditsError.invalidResponse("available_count must not be negative")
+            throw CodexResetCreditsError.invalidResponse("available_count 应为非负数")
         }
 
-        let available = payload.credits.filter { credit in
-            credit.status == "available" && (credit.expiresAt.map { $0 > referenceDate } ?? true)
-        }
+        let credits = payload.credits.map { QuotaResetCredit(status: $0.status, expiresAt: $0.expiresAt) }
+        let available = credits.filter { $0.isAvailable(at: referenceDate) }
         let nextExpiration = available.compactMap(\.expiresAt).min()
         return QuotaResetCreditsSnapshot(
             availableCount: available.count,
-            nextExpiresAt: nextExpiration)
+            nextExpiresAt: nextExpiration,
+            credits: credits,
+            serverAvailableCount: payload.availableCount)
     }
 
     static func resetCreditsURL(environment: [String: String]) -> URL {
@@ -184,7 +185,7 @@ struct CodexResetCreditsClient: Sendable {
         }
         throw DecodingError.dataCorruptedError(
             in: container,
-            debugDescription: "Invalid ISO-8601 date: \(value)")
+            debugDescription: "ISO-8601 日期无效：\(value)")
     }
 }
 
@@ -199,17 +200,17 @@ enum CodexResetCreditsError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .credentialsNotFound:
-            "Codex auth.json was not found."
+            "Codex auth.json 文件缺失。"
         case let .invalidCredentials(message):
-            "Codex auth.json is invalid: \(message)"
+            "Codex auth.json 无效：\(message)"
         case .unauthorized:
-            "Codex authorization expired. Run Codex to sign in again."
+            "Codex 授权已过期。请运行 Codex 并重新登录。"
         case let .invalidResponse(message):
-            "Codex reset-credit response was invalid: \(message)"
+            "Codex 额度重置次数响应无效：\(message)"
         case let .server(status):
-            "Codex reset-credit request failed with HTTP \(status)."
+            "Codex 额度重置次数请求失败，HTTP 状态码为 \(status)。"
         case let .network(message):
-            "Codex reset-credit request failed: \(message)"
+            "Codex 额度重置次数请求失败：\(message)"
         }
     }
 }
@@ -255,7 +256,7 @@ enum CodexAuthStore {
         let object: [String: Any]
         do {
             guard let dictionary = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                throw CodexResetCreditsError.invalidCredentials("Expected a JSON object.")
+                throw CodexResetCreditsError.invalidCredentials("应为 JSON 对象。")
             }
             object = dictionary
         } catch let error as CodexResetCreditsError {
@@ -268,7 +269,7 @@ enum CodexAuthStore {
               let accessToken = self.stringValue(tokens, snake: "access_token", camel: "accessToken"),
               self.stringValue(tokens, snake: "refresh_token", camel: "refreshToken") != nil
         else {
-            throw CodexResetCreditsError.invalidCredentials("Missing OAuth tokens.")
+            throw CodexResetCreditsError.invalidCredentials("OAuth token 缺失。")
         }
         let accountID = self.stringValue(tokens, snake: "account_id", camel: "accountId")
         let lastRefresh = (object["last_refresh"] as? String).flatMap(Self.parseISO8601Date)

@@ -189,18 +189,18 @@ enum CodexAppServerError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .codexNotFound:
-            "Codex CLI was not found. Install Codex or set CODEX_CLI_PATH."
+            "Codex CLI 定位失败。请安装 Codex 或设置 CODEX_CLI_PATH。"
         case let .launchFailed(message):
-            "Could not launch Codex: \(message)"
+            "Codex 启动失败：\(message)"
         case let .connectionClosed(message):
-            message.map { "Codex app-server closed its connection: \($0)" }
-                ?? "Codex app-server closed its connection."
+            message.map { "Codex app-server 已关闭连接：\($0)" }
+                ?? "Codex app-server 已关闭连接。"
         case let .requestFailed(message):
-            "Codex app-server request failed: \(message)"
+            "Codex app-server 请求失败：\(message)"
         case let .invalidResponse(message):
-            "Codex app-server returned invalid data: \(message)"
+            "Codex app-server 返回的数据无效：\(message)"
         case let .timedOut(method):
-            "Codex app-server timed out while waiting for \(method)."
+            "Codex app-server 等待 \(method) 时超时。"
         }
     }
 }
@@ -311,7 +311,7 @@ private struct RateLimitWindow: Decodable {
             keys[0],
             DecodingError.Context(
                 codingPath: container.codingPath,
-                debugDescription: "Missing quota usage percentage."))
+                debugDescription: "额度使用百分比缺失。"))
     }
 
     fileprivate static func decodeInt<Key: CodingKey>(
@@ -623,7 +623,7 @@ enum CodexJSONRPCWire {
         let object: [String: Any]
         do {
             guard let dictionary = try JSONSerialization.jsonObject(with: line) as? [String: Any] else {
-                throw CodexAppServerError.invalidResponse("Expected a JSON object.")
+                throw CodexAppServerError.invalidResponse("应为 JSON 对象。")
             }
             object = dictionary
         } catch let error as CodexAppServerError {
@@ -638,14 +638,14 @@ enum CodexJSONRPCWire {
         guard responseID == matchingID else { return nil }
 
         if let error = object["error"] as? [String: Any] {
-            let message = (error["message"] as? String) ?? "Unknown RPC error"
+            let message = (error["message"] as? String) ?? "未知 RPC 错误"
             throw CodexAppServerError.requestFailed(message)
         }
         guard let result = object["result"] else {
-            throw CodexAppServerError.invalidResponse("Missing result field.")
+            throw CodexAppServerError.invalidResponse("result 字段缺失。")
         }
         guard JSONSerialization.isValidJSONObject(result) else {
-            throw CodexAppServerError.invalidResponse("Result was not valid JSON.")
+            throw CodexAppServerError.invalidResponse("result 的 JSON 格式无效。")
         }
         return try JSONSerialization.data(withJSONObject: result)
     }

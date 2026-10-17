@@ -90,19 +90,19 @@ public enum ActivitySyncConfigurationError: LocalizedError, Equatable, Sendable 
     public var errorDescription: String? {
         switch self {
         case .missingServerURL:
-            "Enter the sync server URL."
+            "请输入同步服务器 URL。"
         case .invalidServerURL:
-            "The sync server URL is invalid."
+            "同步服务器 URL 无效。"
         case .insecureServerURL:
-            "The sync server must use HTTPS. HTTP is allowed only for localhost testing."
+            "同步服务器须使用 HTTPS。HTTP 仅限 localhost 测试。"
         case .missingToken:
-            "Enter this device's sync access token."
+            "请输入此设备的同步访问 token。"
         case .invalidToken:
-            "The sync access token must contain 32 to 512 non-whitespace ASCII characters."
+            "同步访问 token 须包含 32 至 512 个非空白 ASCII 字符。"
         case .invalidDeviceID:
-            "The device ID is invalid."
+            "设备 ID 无效。"
         case .invalidDeviceName:
-            "The device name must contain 1 to 80 characters."
+            "设备名称须包含 1 至 80 个字符。"
         }
     }
 }
@@ -196,19 +196,19 @@ public enum ActivitySyncError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case let .invalidProtocolVersion(version):
-            "Unsupported sync protocol version \(version)."
+            "同步协议版本 \(version) 超出支持范围。"
         case .requestTooLarge:
-            "The activity snapshot exceeds the 16 MiB upload limit."
+            "使用记录快照超出 16 MiB 的上传上限。"
         case .responseTooLarge:
-            "The sync server response is too large."
+            "同步服务器响应超出大小上限。"
         case .unauthorized:
-            "The sync server rejected the shared token."
+            "同步服务器拒绝了共享 token。"
         case .staleSnapshot:
-            "The server already has a newer snapshot for this device."
+            "服务器已保存此设备的更新快照。"
         case let .server(status):
-            "The sync server returned HTTP \(status)."
+            "同步服务器返回 HTTP \(status)。"
         case let .invalidResponse(message):
-            "The sync server returned invalid data: \(message)"
+            "同步服务器返回的数据无效：\(message)"
         }
     }
 }
@@ -257,7 +257,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
             throw ActivitySyncError.invalidProtocolVersion(envelope.protocolVersion)
         }
         guard envelope.device.id.caseInsensitiveCompare(configuration.device.id) == .orderedSame else {
-            throw ActivitySyncError.invalidResponse("the upload device does not match the configured device")
+            throw ActivitySyncError.invalidResponse("上传设备与配置设备存在差异")
         }
         try Self.validate(
             device: envelope.device,
@@ -347,7 +347,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
                     snapshot: sanitizedSnapshot)
                 guard deviceIDs.insert(record.device.id).inserted else {
                     throw ActivitySyncError.invalidResponse(
-                        "the download contains duplicate device IDs")
+                        "下载内容包含重复的设备 ID")
                 }
                 snapshots.append(ActivitySyncStoredSnapshot(
                     device: record.device,
@@ -400,21 +400,21 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
         guard let deviceID = UUID(uuidString: device.id),
               deviceID.uuidString.lowercased() == device.id
         else {
-            throw ActivitySyncError.invalidResponse("a device ID is not a UUID")
+            throw ActivitySyncError.invalidResponse("设备 ID 应为 UUID")
         }
         let name = device.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty,
               name.count <= 80,
               !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
         else {
-            throw ActivitySyncError.invalidResponse("a device name is invalid")
+            throw ActivitySyncError.invalidResponse("设备名称无效")
         }
         if let clientVersion = device.clientVersion {
             guard clientVersion.count <= 80,
                   !clientVersion.unicodeScalars.contains(
                     where: CharacterSet.controlCharacters.contains)
             else {
-                throw ActivitySyncError.invalidResponse("a client version is invalid")
+                throw ActivitySyncError.invalidResponse("客户端版本无效")
             }
         }
         guard generatedAtMs > 0,
@@ -423,13 +423,13 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
               snapshot.schemaVersion > 0,
               !snapshot.timezone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else {
-            throw ActivitySyncError.invalidResponse("a snapshot has invalid metadata")
+            throw ActivitySyncError.invalidResponse("快照元数据无效")
         }
         guard snapshot.timezone.count <= 128,
               !snapshot.timezone.unicodeScalars.contains(
                 where: CharacterSet.controlCharacters.contains)
         else {
-            throw ActivitySyncError.invalidResponse("a snapshot timezone is invalid")
+            throw ActivitySyncError.invalidResponse("快照时区无效")
         }
         try Self.validate(snapshot: snapshot)
     }
@@ -445,7 +445,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
         var dayIDs = Set<String>()
         for day in snapshot.days {
             guard dayIDs.insert(day.date).inserted else {
-                throw ActivitySyncError.invalidResponse("snapshot days contain duplicate dates")
+                throw ActivitySyncError.invalidResponse("快照的每日数据包含重复日期")
             }
             try Self.validate(day: day)
         }
@@ -454,7 +454,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
             let identity = "\(session.platformID.rawValue)\u{0}\(session.id)"
             guard sessionIDs.insert(identity).inserted else {
                 throw ActivitySyncError.invalidResponse(
-                    "snapshot sessions contain duplicate identities")
+                    "快照会话包含重复标识")
             }
             try Self.validate(session: session)
         }
@@ -464,7 +464,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
                   sourcePlatforms.insert(source.platform).inserted
             else {
                 throw ActivitySyncError.invalidResponse(
-                    "snapshot sources contain an invalid or duplicate platform")
+                    "快照来源包含无效或重复的平台")
             }
             try Self.validate(totals: source.today, label: "source.today")
             if let totals = source.rangeTotals {
@@ -477,7 +477,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
             for day in source.days {
                 guard sourceDayIDs.insert(day.date).inserted else {
                     throw ActivitySyncError.invalidResponse(
-                        "source days contain duplicate dates")
+                        "来源的每日数据包含重复日期")
                 }
                 try Self.validate(day: day)
             }
@@ -488,14 +488,14 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
                   memory.lastMemoryReceivedAtMs.map({ $0 > 0 }) ?? true,
                   memory.observationCount >= 0
             else {
-                throw ActivitySyncError.invalidResponse("snapshot memory metadata is invalid")
+                throw ActivitySyncError.invalidResponse("快照的记忆元数据无效")
             }
             try Self.validate(memory: memory.today)
             try Self.validate(memory: memory.rangeTotals)
             var memoryDayIDs = Set<String>()
             for day in memory.days {
                 guard !day.date.isEmpty, memoryDayIDs.insert(day.date).inserted else {
-                    throw ActivitySyncError.invalidResponse("snapshot memory day is invalid")
+                    throw ActivitySyncError.invalidResponse("快照的每日记忆数据无效")
                 }
                 try Self.validate(memory: day.totals)
             }
@@ -514,12 +514,12 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
                   totals.averageTimeToFirstTokenMs,
                   sampleCount: totals.firstTokenSampleCount)
         else {
-            throw ActivitySyncError.invalidResponse("\(label) contains invalid totals")
+            throw ActivitySyncError.invalidResponse("\(label) 包含无效的合计数据")
         }
         if let costs = totals.tokenCosts {
             let values = [costs.input, costs.output, costs.cacheRead, costs.cacheWrite, costs.reasoning]
             guard values.allSatisfy(Self.isNonnegativeFinite) else {
-                throw ActivitySyncError.invalidResponse("\(label) contains invalid token costs")
+                throw ActivitySyncError.invalidResponse("\(label) 包含无效的 token 费用")
             }
         }
     }
@@ -528,13 +528,13 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
         guard [tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite, tokens.reasoning]
             .allSatisfy({ $0 >= 0 })
         else {
-            throw ActivitySyncError.invalidResponse("\(label) contains negative tokens")
+            throw ActivitySyncError.invalidResponse("\(label) 包含负数 token")
         }
     }
 
     private static func validate(range: ActivityRangeSummary, generatedAtMs: Int64) throws {
         guard range.startedAtMs > 0, range.startedAtMs <= generatedAtMs else {
-            throw ActivitySyncError.invalidResponse("snapshot range timestamp is invalid")
+            throw ActivitySyncError.invalidResponse("快照时间范围的时间戳无效")
         }
         try Self.validate(totals: range.totals, label: "snapshot range")
     }
@@ -551,7 +551,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
               day.requestCount >= 0,
               day.sessionCount >= 0
         else {
-            throw ActivitySyncError.invalidResponse("snapshot day is invalid")
+            throw ActivitySyncError.invalidResponse("快照的每日数据无效")
         }
         try Self.validate(tokens: day.tokens, label: "snapshot day tokens")
         for model in day.models {
@@ -559,7 +559,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
                   model.requestCount >= 0,
                   model.sessionCount >= 0
             else {
-                throw ActivitySyncError.invalidResponse("snapshot daily model is invalid")
+                throw ActivitySyncError.invalidResponse("快照的每日模型数据无效")
             }
             try Self.validate(tokens: model.tokens, label: "snapshot daily model tokens")
         }
@@ -574,7 +574,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
               session.workspacePath == nil,
               session.workspaceLabel == nil
         else {
-            throw ActivitySyncError.invalidResponse("snapshot session is invalid or not redacted")
+            throw ActivitySyncError.invalidResponse("快照会话数据无效或包含待脱敏内容")
         }
         try Self.validate(tokens: session.tokens, label: "snapshot session tokens")
         for request in session.requests {
@@ -597,7 +597,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
               request.outputPreview == nil,
               request.sessionPath == nil
         else {
-            throw ActivitySyncError.invalidResponse("snapshot request is invalid or not redacted")
+            throw ActivitySyncError.invalidResponse("快照请求数据无效或包含待脱敏内容")
         }
         try Self.validate(tokens: request.tokens, label: "snapshot request tokens")
         for contribution in request.contributions ?? [] {
@@ -615,7 +615,7 @@ public struct ActivitySyncRemoteClient: ActivitySyncNetworking, Sendable {
                 phase.output,
                 phase.reasoningOutput,
             ].allSatisfy({ $0 >= 0 }) else {
-                throw ActivitySyncError.invalidResponse("snapshot memory totals are invalid")
+                throw ActivitySyncError.invalidResponse("快照的记忆合计数据无效")
             }
         }
     }
@@ -710,6 +710,10 @@ public struct SynchronizedActivityService: ActivityProviding, Sendable {
         return await self.synchronize(local)
     }
 
+    public func fetchHistory(days: Int, endDate: String, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot {
+        try await self.local.fetchHistory(days: days, endDate: endDate, statisticsTimeZone: statisticsTimeZone)
+    }
+
     public func fetchSessions(
         on date: String,
         statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> [SessionSummary]
@@ -777,8 +781,8 @@ public struct SynchronizedActivityService: ActivityProviding, Sendable {
                 if incompatibleDeviceCount > 0 {
                     messages.append(
                         incompatibleDeviceCount == 1
-                            ? "1 device uses a different statistics timezone."
-                            : "\(incompatibleDeviceCount) devices use a different statistics timezone.")
+                            ? "1 台设备使用了不同的统计时区。"
+                            : "\(incompatibleDeviceCount) 台设备使用了不同的统计时区。")
                 }
                 await self.report(ActivitySyncReport(
                     phase: messages.isEmpty ? .success : .partial,
@@ -840,8 +844,8 @@ public struct SynchronizedActivityService: ActivityProviding, Sendable {
             if incompatibleDeviceCount > 0 {
                 messages.append(
                     incompatibleDeviceCount == 1
-                        ? "1 device uses a different statistics timezone."
-                        : "\(incompatibleDeviceCount) devices use a different statistics timezone.")
+                        ? "1 台设备使用了不同的统计时区。"
+                        : "\(incompatibleDeviceCount) 台设备使用了不同的统计时区。")
             }
             let succeededAt = self.now()
             await self.report(ActivitySyncReport(
@@ -980,7 +984,8 @@ public enum ActivitySnapshotMerger {
             weeklySinceReset: weeklySinceReset,
             sources: sources,
             rangeTotals: rangeTotals,
-            memoryUsage: local.memoryUsage)
+            memoryUsage: local.memoryUsage,
+            pricingModels: local.pricingModels)
     }
 
     private struct Candidate {
@@ -1287,7 +1292,7 @@ public enum ActivitySyncCredentialError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case let .keychain(status):
-            "Keychain operation failed (\(status))."
+            "钥匙串操作失败（\(status)）。"
         }
     }
 }

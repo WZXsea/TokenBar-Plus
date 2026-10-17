@@ -9,13 +9,13 @@ public enum AntigravityQuotaServiceError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .logUnavailable:
-            "Antigravity's local logs were not found. Launch Antigravity once first."
+            "Antigravity 本地日志缺失。请先启动一次 Antigravity。"
         case .serverUnavailable:
-            "Antigravity's local language server is not running. Open Antigravity to refresh quota."
+            "Antigravity 本地语言服务器已停止。请打开 Antigravity 以刷新额度。"
         case let .requestFailed(message):
-            "Antigravity's local language server refused the quota request: \(message)"
+            "Antigravity 本地语言服务器拒绝了额度请求：\(message)"
         case .invalidResponse:
-            "Antigravity returned quota data TokenBar could not read."
+            "Antigravity 返回的额度数据解析失败。"
         }
     }
 }

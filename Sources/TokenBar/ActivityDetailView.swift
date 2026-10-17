@@ -77,9 +77,9 @@ struct ActivityDetailView: View {
                 self.dayDetail(day)
             } else {
                 ContentUnavailableView(
-                    "No activity",
+                    "等待使用记录",
                     systemImage: "chart.bar",
-                    description: Text("Activity will appear after local sessions are scanned."))
+                    description: Text("扫描本地会话后显示使用记录。"))
             }
         }
         .padding(16)
@@ -97,9 +97,9 @@ struct ActivityDetailView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("Activity Detail")
+            Text("使用记录详情")
                 .font(.system(size: 14, weight: .semibold))
-            Text("30 days")
+            Text("30 天")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -107,7 +107,7 @@ struct ActivityDetailView: View {
                 Text(totals.tokens.total.compactCount)
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                Text("tokens")
+                Text("token")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
@@ -121,8 +121,8 @@ struct ActivityDetailView: View {
         return Chart {
             ForEach(Array(self.days.enumerated()), id: \.element.id) { index, day in
                 BarMark(
-                    x: .value("Day", Double(index)),
-                    y: .value("Tokens", day.tokens.total))
+                    x: .value("日期", Double(index)),
+                    y: .value("token", day.tokens.total))
                     .foregroundStyle(
                         day.id == self.selectedDay?.id
                             ? self.accentColor
@@ -131,7 +131,7 @@ struct ActivityDetailView: View {
             }
 
             if let selectedIndex = self.selectedIndex {
-                RuleMark(x: .value("Selected", Double(selectedIndex)))
+                RuleMark(x: .value("选中日期", Double(selectedIndex)))
                     .foregroundStyle(self.accentColor.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
             }
@@ -201,9 +201,9 @@ struct ActivityDetailView: View {
                         .font(.system(size: 13, weight: .semibold))
                     Text(
                         [
-                            "\(day.sessionCount) sessions",
-                            "\(day.requestCount) turns",
-                            "Cache \(day.tokens.cachePercentageText)",
+                            "\(day.sessionCount) 个会话",
+                            "\(day.requestCount) 轮次",
+                            "缓存 \(day.tokens.cachePercentageText)",
                             day.menuPerformanceText,
                         ]
                         .compactMap(\.self)
@@ -230,12 +230,12 @@ struct ActivityDetailView: View {
                 }
             }
 
-            Text("Models")
+            Text("模型")
                 .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(.secondary)
 
             if day.models.isEmpty {
-                Text("Model breakdown is unavailable for cached activity. Refresh to load it.")
+                Text("刷新使用记录后可载入模型明细。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -290,8 +290,8 @@ private struct ActivityModelRow: View {
                         .font(.system(size: 11.5, weight: .medium))
                         .lineLimit(1)
                     Text(
-                        "\(self.usage.provider) · \(self.usage.requestCount) turns · "
-                            + "\(self.usage.sessionCount) sessions")
+                        "\(self.usage.provider) · \(self.usage.requestCount) 轮次 · "
+                            + "\(self.usage.sessionCount) 个会话")
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -300,7 +300,7 @@ private struct ActivityModelRow: View {
                 Text(self.usage.tokens.total.compactCount)
                     .font(.system(size: 10.5, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                Text("Cache \(self.usage.tokens.cachePercentageText)")
+                Text("缓存 \(self.usage.tokens.cachePercentageText)")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Text(self.usage.costUsd.costText(tokenTotal: self.usage.tokens.total))

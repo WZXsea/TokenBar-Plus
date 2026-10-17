@@ -11,13 +11,13 @@ enum SessionLauncherError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidSessionID:
-            "The session does not have a valid identifier."
+            "会话标识符格式有误。"
         case let .workspaceUnavailable(platform):
-            "This \(platform.displayName) session did not record a workspace folder to open."
+            "此 \(platform.displayName) 会话的工作区路径为空。"
         case let .unsupportedPlatform(platform):
-            "Opening \(platform.displayName) sessions is not supported."
+            "打开 \(platform.displayName) 会话需要对应客户端支持。"
         case let .applicationUnavailable(platform):
-            "macOS could not open this session in the \(platform.displayName) app."
+            "macOS 在 \(platform.displayName) 中打开此会话时出错。"
         }
     }
 }

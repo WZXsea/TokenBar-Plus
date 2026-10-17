@@ -8,11 +8,11 @@ public enum GrokQuotaServiceError: LocalizedError, Equatable, Sendable {
     public var errorDescription: String? {
         switch self {
         case .logUnavailable:
-            "Grok Build's local usage log was not found. Run `grok` and sign in first."
+            "Grok Build 本地用量日志缺失。请先运行 `grok` 并登录。"
         case .snapshotUnavailable:
-            "Grok quota data was not found. Open Grok Build and run `/usage` once."
+            "Grok 额度数据缺失。请打开 Grok Build 并运行一次 `/usage`。"
         case .invalidSnapshot:
-            "Grok Build returned invalid quota data."
+            "Grok Build 返回的额度数据无效。"
         }
     }
 }

@@ -15,7 +15,7 @@ public enum CodexQuotaServiceError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .noQuotaWindows:
-            "Codex did not return a 5-hour or weekly quota window."
+            "Codex 返回的数据缺少 5 小时或每周额度窗口。"
         }
     }
 }

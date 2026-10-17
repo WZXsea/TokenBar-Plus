@@ -73,7 +73,7 @@ struct MenuRowPresentationTests {
             prompt: nil,
             output: "  found\nthree files ")
 
-        #expect(request.menuRowTitle == "↳ researcher · Output · found three files")
+        #expect(request.menuRowTitle == "↳ researcher · 输出 · found three files")
     }
 
     @Test("Request duration uses Tokscale compact units")
@@ -201,7 +201,7 @@ struct MenuRowPresentationTests {
             contributions: [main, child])
 
         #expect(turn.physicalRequests.map(\.id) == ["main", "child"])
-        #expect(main.agentRequestMenuTitle == "Main")
+        #expect(main.agentRequestMenuTitle == "主智能体")
         #expect(child.agentRequestMenuTitle == "Faraday")
         #expect(turn.menuRowTitle == "Prompt")
     }
@@ -232,17 +232,17 @@ struct MenuRowPresentationTests {
             requests: [fastTurn, mixedTurn])
 
         #expect(fast.menuServiceTier == .fast)
-        #expect(fast.menuServiceTierBadge == "FAST")
+        #expect(fast.menuServiceTierBadge == "快速")
         #expect(fastTurn.menuServiceTier == .fast)
-        #expect(fastTurn.menuServiceTierBadge == "FAST")
+        #expect(fastTurn.menuServiceTierBadge == "快速")
         #expect(standard.menuServiceTierBadge == nil)
         #expect(unknown.menuServiceTier == .unknown)
         #expect(unknown.menuServiceTierBadge == nil)
         #expect(mixedTurn.menuServiceTier == .mixed)
-        #expect(mixedTurn.menuServiceTierBadge == "MIXED")
+        #expect(mixedTurn.menuServiceTierBadge == "混合")
         #expect(aggregateFallback.menuServiceTier == .fast)
         #expect(session.menuServiceTier == .mixed)
-        #expect(session.menuServiceTierBadge == "MIXED")
+        #expect(session.menuServiceTierBadge == "混合")
     }
 
     @Test("Menu costs distinguish estimated, reported, tiny, and unknown values")

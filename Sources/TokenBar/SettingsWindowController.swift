@@ -12,7 +12,10 @@ final class SettingsWindowController: NSWindowController {
         memoryTelemetry: MemoryTelemetryController? = nil,
         activitySync: ActivitySyncController? = nil,
         syncNow: @escaping () -> Void = {},
-        testResetAnimation: @escaping () -> Void = {})
+        testResetAnimation: @escaping () -> Void = {},
+        pricingStore: ModelPricingStore = .shared,
+        priceQuoteService: (any ModelPriceQuoting)? = nil,
+        observedPricingModels: [ObservedPricingModel] = [])
     {
         self.loginItem = loginItem
         let hostingController = NSHostingController(
@@ -22,9 +25,12 @@ final class SettingsWindowController: NSWindowController {
                 memoryTelemetry: memoryTelemetry,
                 activitySync: activitySync,
                 syncNow: syncNow,
-                testResetAnimation: testResetAnimation))
+                testResetAnimation: testResetAnimation,
+                pricingStore: pricingStore,
+                priceQuoteService: priceQuoteService,
+                observedPricingModels: observedPricingModels))
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "TokenBar Settings"
+        window.title = "TokenBar 设置"
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.setContentSize(NSSize(width: 480, height: 820))

@@ -1020,7 +1020,7 @@ struct ActivitySyncTests {
         #expect(result == local)
         #expect(report.phase == .partial)
         #expect(report.deviceCount == 1)
-        #expect(report.message?.contains("different statistics timezone") == true)
+        #expect(report.message?.contains("不同的统计时区") == true)
     }
 
     @Test("cancellation preserves local activity and clears syncing state")

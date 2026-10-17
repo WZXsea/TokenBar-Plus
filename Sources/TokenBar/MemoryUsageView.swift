@@ -17,16 +17,16 @@ struct MemorySummarySection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Codex Memory")
+                Text("Codex 记忆")
                     .font(.system(size: 12, weight: .semibold))
-                Text("Today")
+                Text("今日")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(self.totals.total.compactCount)
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                Text("tokens")
+                Text("token")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                 Image(systemName: "chevron.right")
@@ -35,16 +35,16 @@ struct MemorySummarySection: View {
             }
 
             HStack(spacing: 8) {
-                self.phaseSummary("Phase 1", usage: self.totals.phase1, color: self.accentColor)
-                self.phaseSummary("Phase 2", usage: self.totals.phase2, color: .blue)
+                self.phaseSummary("阶段 1", usage: self.totals.phase1, color: self.accentColor)
+                self.phaseSummary("阶段 2", usage: self.totals.phase2, color: .blue)
             }
 
             let combined = self.totals.combined
             HStack(spacing: 10) {
-                self.inlineMetric("In", combined.input)
-                self.inlineMetric("Cached", combined.cachedInput)
-                self.inlineMetric("Out", combined.output)
-                self.inlineMetric("Reason", combined.reasoningOutput)
+                self.inlineMetric("输入", combined.input)
+                self.inlineMetric("缓存", combined.cachedInput)
+                self.inlineMetric("输出", combined.output)
+                self.inlineMetric("推理", combined.reasoningOutput)
             }
 
             HStack(spacing: 5) {
@@ -54,7 +54,7 @@ struct MemorySummarySection: View {
                 Text(self.statusText)
                     .lineLimit(1)
                 Spacer()
-                Text("Cost —")
+                Text("费用 —")
                     .foregroundStyle(.tertiary)
             }
             .font(.system(size: 9.5))
@@ -98,18 +98,18 @@ struct MemorySummarySection: View {
 
     private var statusText: String {
         guard self.receiverState.isListening else {
-            return "Receiver \(self.receiverState.title.lowercased())"
+            return "接收器：\(self.receiverState.title.lowercased())"
         }
         guard self.configurationState == .configured else {
-            return "Codex config: \(self.configurationState.title.lowercased())"
+            return "Codex 配置：\(self.configurationState.title.lowercased())"
         }
         guard self.usage?.lastReceivedAt != nil else {
-            return "Restart Codex/ChatGPT · no OTLP yet"
+            return "等待 OTLP · 请重启 Codex/ChatGPT"
         }
         if let lastMemoryReceivedAt = self.usage?.lastMemoryReceivedAt {
-            return "Memory export \(lastMemoryReceivedAt.memoryRelativeText)"
+            return "记忆指标上报于\(lastMemoryReceivedAt.memoryRelativeText)"
         }
-        return "Connected · waiting for a Memory run"
+        return "已连接 · 等待记忆运行"
     }
 
     private var statusColor: Color {
@@ -157,16 +157,16 @@ struct MemoryDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("Codex Memory Tokens")
+                Text("Codex 记忆用量")
                     .font(.system(size: 14, weight: .semibold))
-                Text("30 days")
+                Text("30 天")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text(self.rangeTotals.total.compactCount)
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                Text("tokens")
+                Text("token")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
             }
@@ -192,7 +192,7 @@ struct MemoryDetailView: View {
                     Text(day.totals.total.compactCount)
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
                         .monospacedDigit()
-                    Text("tokens")
+                    Text("token")
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
@@ -200,11 +200,11 @@ struct MemoryDetailView: View {
 
             HStack(alignment: .top, spacing: 10) {
                 MemoryPhaseCard(
-                    title: "Phase 1 · Extraction",
+                    title: "阶段 1 · 提取",
                     usage: self.selectedTotals.phase1,
                     color: self.accentColor)
                 MemoryPhaseCard(
-                    title: "Phase 2 · Consolidation",
+                    title: "阶段 2 · 整合",
                     usage: self.selectedTotals.phase2,
                     color: .blue)
             }
@@ -212,23 +212,23 @@ struct MemoryDetailView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 7) {
-                self.statusRow("Receiver", value: self.telemetry.receiverState.title)
-                self.statusRow("Codex config", value: self.telemetry.configurationState.title)
+                self.statusRow("接收器", value: self.telemetry.receiverState.title)
+                self.statusRow("Codex 配置", value: self.telemetry.configurationState.title)
                 if let usage = self.usage {
                     self.statusRow(
-                        "Collecting since",
+                        "开始采集",
                         value: usage.collectedFrom.memoryTimestampText)
                     self.statusRow(
-                        "Last OTLP export",
+                        "最近 OTLP 上报",
                         value: usage.lastReceivedAt?.memoryTimestampText
-                            ?? "No Codex connection yet")
+                            ?? "等待 Codex 连接")
                     self.statusRow(
-                        "Last Memory export",
+                        "最近记忆指标上报",
                         value: usage.lastMemoryReceivedAt?.memoryTimestampText
-                            ?? "No Memory metrics received")
+                            ?? "等待记忆指标")
                     self.statusRow(
-                        "Local storage",
-                        value: "\(usage.observationCount.formatted()) observations · SQLite")
+                        "本地存储",
+                        value: "\(usage.observationCount.formatted()) 次观测 · SQLite")
                 }
             }
             .font(.system(size: 10.5))
@@ -241,8 +241,8 @@ struct MemoryDetailView: View {
             if self.telemetry.configurationState.canInstall {
                 Button(
                     self.telemetry.configurationState == .needsAnalytics
-                        ? "Enable Codex Analytics"
-                        : "Enable Memory Metrics")
+                        ? "启用 Codex 分析"
+                        : "启用记忆指标")
                 {
                     self.telemetry.installConfiguration()
                 }
@@ -271,16 +271,16 @@ struct MemoryDetailView: View {
         return Chart {
             ForEach(Array(self.days.enumerated()), id: \.element.id) { index, day in
                 BarMark(
-                    x: .value("Day", Double(index)),
-                    y: .value("Phase 1", day.phase1.total))
+                    x: .value("日期", Double(index)),
+                    y: .value("阶段 1", day.phase1.total))
                     .foregroundStyle(
                         day.id == self.selectedDay?.id
                             ? self.accentColor
                             : self.accentColor.opacity(0.34))
                     .cornerRadius(2)
                 BarMark(
-                    x: .value("Day", Double(index)),
-                    y: .value("Phase 2", day.phase2.total))
+                    x: .value("日期", Double(index)),
+                    y: .value("阶段 2", day.phase2.total))
                     .foregroundStyle(
                         day.id == self.selectedDay?.id
                             ? Color.blue
@@ -289,7 +289,7 @@ struct MemoryDetailView: View {
             }
 
             if let selectedIndex = self.selectedIndex {
-                RuleMark(x: .value("Selected", Double(selectedIndex)))
+                RuleMark(x: .value("选中日期", Double(selectedIndex)))
                     .foregroundStyle(self.accentColor.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 2]))
             }
@@ -370,25 +370,25 @@ struct MemoryDetailView: View {
 
     private var footerText: String {
         if self.telemetry.configurationState == .customOpenTelemetry {
-            return "TokenBar preserved the existing [otel] block. Point its metrics exporter to \(CodexMemoryConfigurationService.endpoint) with JSON, or keep the custom collector."
+            return "TokenBar 已保留现有 [otel] 配置。可将指标导出器以 JSON 格式指向 \(CodexMemoryConfigurationService.endpoint)，或继续使用自定义收集器。"
         }
-        return "Only future Memory runs are counted; historical tokens cannot be backfilled. Uses histogram sum, not observation count. Cached input and reasoning are subsets, and pricing attribution is unavailable."
+        return "统计始于启用后的记忆运行；历史 token 回填与费用归因留空。用量取直方图累计值，观测次数单列。缓存输入和推理输出为子集。"
     }
 
     private var emptyStateText: String {
         if self.telemetry.configurationState.canInstall {
-            return "Enable Memory metrics to start collecting"
+            return "启用记忆指标后开始采集"
         }
         if self.telemetry.configurationState == .customOpenTelemetry {
-            return "Point the Codex metrics exporter to TokenBar"
+            return "请将 Codex 指标导出器指向 TokenBar"
         }
         guard self.telemetry.receiverState.isListening else {
-            return "Memory metrics receiver is unavailable"
+            return "记忆指标接收器待就绪"
         }
         guard self.usage?.lastReceivedAt != nil else {
-            return "Restart Codex/ChatGPT to activate metrics"
+            return "重启 Codex/ChatGPT 以启用指标"
         }
-        return "Connected · waiting for Phase 1 or Phase 2"
+        return "已连接 · 等待阶段 1 或阶段 2"
     }
 }
 
@@ -409,11 +409,11 @@ private struct MemoryPhaseCard: View {
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .monospacedDigit()
             }
-            self.row("Input", self.usage.input)
-            self.row("Cached input", self.usage.cachedInput)
-            self.row("Cache write", self.usage.cacheWriteInput)
-            self.row("Output", self.usage.output)
-            self.row("Reasoning", self.usage.reasoningOutput)
+            self.row("输入", self.usage.input)
+            self.row("缓存输入", self.usage.cachedInput)
+            self.row("缓存写入", self.usage.cacheWriteInput)
+            self.row("输出", self.usage.output)
+            self.row("推理", self.usage.reasoningOutput)
         }
         .padding(10)
         .frame(maxWidth: .infinity)
@@ -439,16 +439,16 @@ private extension Date {
                 .year()
                 .hour()
                 .minute()
-                .locale(Locale(identifier: "en_US")))
+                .locale(Locale(identifier: "zh_CN")))
     }
 
     var memoryRelativeText: String {
         let seconds = max(0, Int(Date().timeIntervalSince(self)))
         return switch seconds {
-        case 0 ..< 60: "just now"
-        case 60 ..< 3_600: "\(seconds / 60)m ago"
-        case 3_600 ..< 86_400: "\(seconds / 3_600)h ago"
-        default: "\(seconds / 86_400)d ago"
+        case 0 ..< 60: "刚刚"
+        case 60 ..< 3_600: "\(seconds / 60) 分钟前"
+        case 3_600 ..< 86_400: "\(seconds / 3_600) 小时前"
+        default: "\(seconds / 86_400) 天前"
         }
     }
 }

@@ -14,7 +14,7 @@ struct LoginItemControllerTests {
         #expect(controller.isEnabled)
         #expect(controller.isAvailable)
         #expect(!controller.requiresApproval)
-        #expect(controller.detail == "TokenBar opens automatically after you sign in.")
+        #expect(controller.detail == "TokenBar 会在登录后自动打开。")
     }
 
     @Test("registers the app as a login item")
@@ -64,7 +64,7 @@ struct LoginItemControllerTests {
         #expect(!controller.isEnabled)
         #expect(
             controller.errorMessage
-                == "Could not enable launch at login: Registration failed.")
+                == "启用登录时启动功能时出错：Registration failed.")
 
         service.registerError = nil
         service.status = .enabled

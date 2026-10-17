@@ -5,9 +5,14 @@ import TokenBarCore
 final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
     let memoryTelemetryController = MemoryTelemetryController()
     let activitySyncController = ActivitySyncController(settings: .shared)
+    let modelPricingStore = ModelPricingStore.shared
     private let openAIPricingCatalog = OpenAIPricingCatalogUpdater()
     private let anthropicPricingCatalog = AnthropicPricingCatalogUpdater()
     private let openRouterPricingCatalog = OpenRouterPricingCatalogUpdater()
+    lazy var modelPriceQuoteService: any ModelPriceQuoting = ModelPriceQuoteService(
+        openAIPricingCatalog: self.openAIPricingCatalog,
+        anthropicPricingCatalog: self.anthropicPricingCatalog,
+        openRouterPricingCatalog: self.openRouterPricingCatalog)
     private lazy var model: DashboardModel = {
         #if DEBUG
         if ProcessInfo.processInfo.environment["TOKENBAR_DEMO_MODE"] == "1" {
@@ -19,7 +24,9 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
                     DemoAntigravityQuotaProvider(),
                 ],
                 activityService: DemoActivityProvider(),
-                cache: nil)
+                cache: nil,
+                weeklyQuotaUsageCache: ProcessInfo.processInfo.environment["TOKENBAR_DEMO_QUOTA_DAYS"] == "1"
+                    ? DemoQuotaDayHistoryCache() : nil)
         }
         #endif
         let memoryDatabaseURL = self.memoryTelemetryController.paths.databaseURL
@@ -28,6 +35,9 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run {
                     settings?.monitorsCodexMemory == true ? memoryDatabaseURL : nil
                 }
+            },
+            customPricingURLProvider: { [weak store = self.modelPricingStore] in
+                await MainActor.run { store?.activeFileURL }
             },
             openAIPricingCatalog: self.openAIPricingCatalog,
             anthropicPricingCatalog: self.anthropicPricingCatalog,
@@ -65,6 +75,7 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
             self.previewTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 await self.model.start()
+                if environment["TOKENBAR_DEMO_HISTORY_RANGE"] == "year" { await self.model.loadHistoryIfNeeded() }
                 try? DemoPreviewRenderer.render(model: self.model, path: previewPath)
                 NSApplication.shared.terminate(nil)
             }
@@ -107,6 +118,21 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        if let previewPath = environment["TOKENBAR_RENDER_PRICING_PREVIEW"] {
+            try? DemoPreviewRenderer.renderPricing(path: previewPath)
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        if let previewPath = environment["TOKENBAR_RENDER_RESET_CREDITS_PREVIEW"] {
+            self.previewTask = Task { @MainActor in
+                if let quota = try? await DemoQuotaProvider().fetchQuota(), let credits = quota.resetCredits {
+                    try? DemoPreviewRenderer.renderResetCredits(
+                        snapshot: credits, sampledAt: quota.updatedAt, path: previewPath)
+                }
+                NSApplication.shared.terminate(nil)
+            }
+            return
+        }
         if let previewPath = environment["TOKENBAR_RENDER_STATUS_PREVIEW"] {
             try? DemoPreviewRenderer.renderStatus(path: previewPath)
             NSApplication.shared.terminate(nil)
@@ -132,7 +158,8 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
             showSettings: { [weak self] in
                 self?.showSettings()
             },
-            requestDetailService: requestDetailService)
+            requestDetailService: requestDetailService,
+            pricingStore: self.modelPricingStore)
         self.statusController = controller
         self.model.quotaResetHandler = { [weak self] event in
             self?.handleQuotaReset(event)
@@ -155,7 +182,7 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showSettings() {
-        if self.settingsWindowController == nil {
+        if self.settingsWindowController?.window?.isVisible != true {
             self.settingsWindowController = SettingsWindowController(
                 settings: self.settings,
                 memoryTelemetry: self.memoryTelemetryController,
@@ -167,7 +194,10 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
                 },
                 testResetAnimation: { [weak self] in
                     self?.testResetAnimation()
-                })
+                },
+                pricingStore: self.modelPricingStore,
+                priceQuoteService: self.modelPriceQuoteService,
+                observedPricingModels: self.observedPricingModels)
         }
         self.settingsWindowController?.show()
     }
@@ -180,6 +210,20 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
 
     func refreshActivity() async {
         await self.model.refreshActivity()
+    }
+
+    var observedPricingModels: [ObservedPricingModel] {
+        guard let snapshot = self.model.activitySnapshot else { return [] }
+        var models: [String: ObservedPricingModel] = [:]
+        let supported: Set<TokenPlatform> = [.codex, .claude, .grok, .antigravity]
+        func insert(_ modelID: String, platform: TokenPlatform) {
+            let modelID = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard supported.contains(platform), !modelID.isEmpty, modelID != "unknown" else { return }
+            let model = ObservedPricingModel(platform: platform, modelID: modelID)
+            models[model.id.lowercased()] = model
+        }
+        for model in snapshot.pricingModels ?? [] { insert(model.modelID, platform: model.platform) }
+        return models.values.sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
     }
 
     private func handleQuotaReset(_ event: QuotaResetEvent) {

@@ -17,6 +17,7 @@ use tokenbar_helper::antigravity::{
     LocalParseOptions as AntigravityParseOptions,
 };
 use tokenbar_helper::codex::{parse_local_codex_messages, LocalParseOptions};
+use tokenbar_helper::custom_pricing::{quote_rates, CustomPricing, PriceQuote};
 use tokenbar_helper::grok::{
     extract_request_detail as extract_grok_request_detail, load_grok_session_titles,
     parse_local_grok_messages, LocalParseOptions as GrokParseOptions,
@@ -26,6 +27,7 @@ use tokenbar_helper::memory::{load_usage_snapshot, run_receiver, MemoryReceiverC
 use tokenbar_helper::pricing::{
     AnthropicPricing, CodexPricing, FastPricingBasis, GooglePricing,
 };
+use tokenbar_helper::usage::ServiceTier;
 use tokenbar_helper::{
     build_snapshot_with_platform_resets, extract_request_detail as extract_codex_request_detail,
     load_claude_session_titles, load_codex_session_titles, normalize_codex_reasoning_usage,
@@ -33,9 +35,9 @@ use tokenbar_helper::{
 };
 
 const DEFAULT_DAYS: usize = 30;
-const USAGE: &str = "usage: tokenbar-helper [--days COUNT] [--end-date YYYY-MM-DD] [--home-dir PATH] [--statistics-timezone utc|local] [--weekly-reset-ms MS] [--claude-weekly-reset-ms MS] [--grok-weekly-reset-ms MS] [--antigravity-weekly-reset-ms MS] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--memory-database PATH] [--offline-pricing]\n       tokenbar-helper request-detail [--platform codex|claude|grok|antigravity] --session-path PATH --start-ms MS --end-ms MS\n       tokenbar-helper memory-receiver --database PATH [--status-file PATH] [--port PORT] [--parent-pid PID]";
+const USAGE: &str = "usage: tokenbar-helper [--days COUNT] [--end-date YYYY-MM-DD] [--home-dir PATH] [--statistics-timezone utc|local] [--weekly-reset-ms MS] [--claude-weekly-reset-ms MS] [--grok-weekly-reset-ms MS] [--antigravity-weekly-reset-ms MS] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--custom-pricing-json PATH] [--memory-database PATH] [--offline-pricing]\n       tokenbar-helper price-quote --platform codex|claude|grok|antigravity --model ID --service-tier standard|fast [--home-dir PATH] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--offline-pricing]\n       tokenbar-helper request-detail [--platform codex|claude|grok|antigravity] --session-path PATH --start-ms MS --end-ms MS\n       tokenbar-helper memory-receiver --database PATH [--status-file PATH] [--port PORT] [--parent-pid PID]";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotConfig {
     days: usize,
     end_date: Option<NaiveDate>,
@@ -48,6 +50,7 @@ struct SnapshotConfig {
     openai_pricing_markdown: Option<PathBuf>,
     anthropic_pricing_markdown: Option<PathBuf>,
     openrouter_pricing_json: Option<PathBuf>,
+    custom_pricing_json: Option<PathBuf>,
     memory_database: Option<PathBuf>,
     offline_pricing: bool,
 }
@@ -66,6 +69,7 @@ impl Default for SnapshotConfig {
             openai_pricing_markdown: None,
             anthropic_pricing_markdown: None,
             openrouter_pricing_json: None,
+            custom_pricing_json: None,
             memory_database: None,
             offline_pricing: false,
         }
@@ -81,8 +85,17 @@ struct RequestDetailConfig {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct PriceQuoteConfig {
+    platform: String,
+    model_id: String,
+    service_tier: ServiceTier,
+    pricing: SnapshotConfig,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum Command {
     Snapshot(SnapshotConfig),
+    PriceQuote(PriceQuoteConfig),
     RequestDetail(RequestDetailConfig),
     MemoryReceiver(MemoryReceiverConfig),
 }
@@ -95,6 +108,7 @@ struct CodexAuthConfig {
 fn main() -> Result<(), Box<dyn Error>> {
     match parse_args(env::args_os().skip(1))? {
         Command::Snapshot(config) => run_snapshot(config),
+        Command::PriceQuote(config) => write_json(&automatic_price_quote(&config)),
         Command::RequestDetail(config) => {
             let detail = match config.platform.as_str() {
                 "codex" => {
@@ -131,6 +145,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
+    let custom_pricing = config
+        .custom_pricing_json
+        .as_deref()
+        .map(CustomPricing::from_file)
+        .transpose()
+        .map_err(io::Error::other)?;
     let generated_at_ms = Utc::now().timestamp_millis();
     let current_day = config
         .statistics_time_zone
@@ -253,6 +273,9 @@ fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
     messages.extend(claude_messages);
     messages.extend(grok_messages);
     messages.extend(antigravity_messages);
+    if let Some(pricing) = custom_pricing {
+        pricing.apply(&mut messages);
+    }
     config
         .statistics_time_zone
         .normalize_message_dates(&mut messages);
@@ -293,6 +316,64 @@ fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
 
     snapshot.pricing_catalog = Some(catalog_load.status);
     write_json(&snapshot)
+}
+
+fn automatic_price_quote(config: &PriceQuoteConfig) -> PriceQuote {
+    // Quotes read the existing cache, even when --offline-pricing was omitted.
+    // Refresh/download behavior remains confined to the snapshot command.
+    let today = Utc::now().date_naive();
+    let readonly_pricing = SnapshotConfig {
+        offline_pricing: true,
+        ..config.pricing.clone()
+    };
+    let catalog = load_openrouter_pricing(&readonly_pricing)
+        .catalog
+        .map(Arc::new);
+    let basis = codex_fast_pricing_basis(&config.pricing);
+    let codex = config
+        .pricing
+        .openai_pricing_markdown
+        .as_deref()
+        .and_then(|path| CodexPricing::from_official_markdown_file(path, basis).ok())
+        .unwrap_or_else(|| CodexPricing::with_fast_pricing(basis))
+        .with_openrouter_catalog(catalog.clone());
+    let anthropic = config
+        .pricing
+        .anthropic_pricing_markdown
+        .as_deref()
+        .and_then(|path| AnthropicPricing::from_official_markdown_file(path, today).ok())
+        .unwrap_or_else(|| AnthropicPricing::bundled_for_date(today))
+        .with_openrouter_catalog(catalog);
+    let google = config
+        .pricing
+        .openrouter_pricing_json
+        .as_deref()
+        .and_then(|path| GooglePricing::from_openrouter_catalog_file(path, today).ok())
+        .unwrap_or_else(|| GooglePricing::bundled_for_date(today));
+    let rates = quote_rates(|tokens| match config.platform.as_str() {
+        "codex" => codex.calculate_token_costs_with_service_tier(
+            &config.model_id,
+            None,
+            tokens,
+            config.service_tier,
+        ),
+        "claude" => anthropic.calculate_token_costs(&config.model_id, tokens),
+        "antigravity" => {
+            let model = config.model_id.trim().to_ascii_lowercase();
+            if model.starts_with("claude") || model.starts_with("anthropic/claude") {
+                anthropic.calculate_token_costs(&config.model_id, tokens)
+            } else {
+                google.calculate_token_costs(&config.model_id, tokens)
+            }
+        }
+        _ => None,
+    });
+    PriceQuote {
+        platform: config.platform.clone(),
+        model_id: config.model_id.clone(),
+        service_tier: config.service_tier,
+        rates,
+    }
 }
 
 fn load_openrouter_pricing(config: &SnapshotConfig) -> tokenbar_helper::openrouter::CatalogLoad {
@@ -371,6 +452,9 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, Strin
 
     if first.to_str() == Some("request-detail") {
         return parse_request_detail_args(args).map(Command::RequestDetail);
+    }
+    if first.to_str() == Some("price-quote") {
+        return parse_price_quote_args(args).map(Command::PriceQuote);
     }
     if first.to_str() == Some("memory-receiver") {
         return parse_memory_receiver_args(args).map(Command::MemoryReceiver);
@@ -462,6 +546,10 @@ fn parse_snapshot_args(args: impl IntoIterator<Item = OsString>) -> Result<Snaps
                     .ok_or("--openrouter-pricing-json requires a path")?;
                 config.openrouter_pricing_json = Some(PathBuf::from(value));
             }
+            Some("--custom-pricing-json") => {
+                let value = args.next().ok_or("--custom-pricing-json requires a path")?;
+                config.custom_pricing_json = Some(PathBuf::from(value));
+            }
             Some("--antigravity-weekly-reset-ms") => {
                 let value = args
                     .next()
@@ -500,6 +588,75 @@ fn parse_snapshot_args(args: impl IntoIterator<Item = OsString>) -> Result<Snaps
     }
 
     Ok(config)
+}
+
+fn parse_price_quote_args(
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<PriceQuoteConfig, String> {
+    let mut platform = None;
+    let mut model_id = None;
+    let mut service_tier = None;
+    let mut pricing = SnapshotConfig {
+        offline_pricing: true,
+        ..Default::default()
+    };
+    let mut args = args.into_iter();
+    while let Some(argument) = args.next() {
+        match argument.to_str() {
+            Some("--platform") => {
+                let value = args.next().ok_or("--platform requires a value")?;
+                let value = value.to_str().ok_or("--platform must be valid UTF-8")?;
+                if !matches!(value, "codex" | "claude" | "grok" | "antigravity") {
+                    return Err("--platform must be codex, claude, grok, or antigravity".into());
+                }
+                platform = Some(value.to_string());
+            }
+            Some("--model") => {
+                let value = args.next().ok_or("--model requires a value")?;
+                let value = value.to_str().ok_or("--model must be valid UTF-8")?;
+                if value.trim().is_empty() {
+                    return Err("--model requires a non-empty model ID".into());
+                }
+                model_id = Some(value.to_string());
+            }
+            Some("--service-tier") => {
+                let value = args.next().ok_or("--service-tier requires a value")?;
+                service_tier = Some(match value.to_str() {
+                    Some("standard") => ServiceTier::Standard,
+                    Some("fast") => ServiceTier::Fast,
+                    _ => return Err("--service-tier must be standard or fast".into()),
+                });
+            }
+            Some(
+                "--home-dir"
+                | "--openai-pricing-markdown"
+                | "--anthropic-pricing-markdown"
+                | "--openrouter-pricing-json",
+            ) => {
+                let option = argument.to_str().unwrap();
+                let value = args
+                    .next()
+                    .ok_or_else(|| format!("{option} requires a path"))?;
+                let path = Some(PathBuf::from(value));
+                match option {
+                    "--home-dir" => pricing.home_dir = path,
+                    "--openai-pricing-markdown" => pricing.openai_pricing_markdown = path,
+                    "--anthropic-pricing-markdown" => pricing.anthropic_pricing_markdown = path,
+                    _ => pricing.openrouter_pricing_json = path,
+                }
+            }
+            Some("--offline-pricing") => pricing.offline_pricing = true,
+            Some("--help" | "-h") => return Err(USAGE.to_string()),
+            Some(value) => return Err(format!("unknown price-quote argument: {value}")),
+            None => return Err("arguments must be valid UTF-8".into()),
+        }
+    }
+    Ok(PriceQuoteConfig {
+        platform: platform.ok_or("price-quote requires --platform")?,
+        model_id: model_id.ok_or("price-quote requires --model")?,
+        service_tier: service_tier.ok_or("price-quote requires --service-tier")?,
+        pricing,
+    })
 }
 
 fn parse_memory_receiver_args(
@@ -673,6 +830,7 @@ mod tests {
                 openai_pricing_markdown: Some(PathBuf::from("/tmp/openai-pricing.md")),
                 anthropic_pricing_markdown: Some(PathBuf::from("/tmp/anthropic-pricing.md")),
                 openrouter_pricing_json: Some(PathBuf::from("/tmp/openrouter-models.json")),
+                custom_pricing_json: None,
                 memory_database: None,
                 offline_pricing: false,
             })
@@ -817,5 +975,252 @@ mod tests {
             Some(FastPricingBasis::ApiPriority)
         );
         assert_eq!(fast_pricing_basis_for_auth_mode("future-mode"), None);
+    }
+
+    fn quote_config(args: &[&str]) -> PriceQuoteConfig {
+        let Command::PriceQuote(config) = parse_args(
+            std::iter::once(OsString::from("price-quote"))
+                .chain(args.iter().map(|argument| OsString::from(*argument))),
+        )
+        .unwrap() else {
+            panic!("expected price-quote command")
+        };
+        config
+    }
+
+    fn quote_fixture(path: &std::path::Path) {
+        std::fs::write(path, br#"{"data":[{"id":"openai/gpt-exact-quote-fixture",
+            "pricing":{"prompt":"0.000002","completion":"0.00001","input_cache_read":"0.0000002"}}]}"#).unwrap();
+    }
+
+    #[test]
+    fn accepts_snapshot_custom_pricing_path_and_rejects_a_missing_path() {
+        let Command::Snapshot(config) = parse_args([
+            OsString::from("--custom-pricing-json"),
+            OsString::from("/tmp/custom.json"),
+        ])
+        .unwrap() else {
+            panic!("expected snapshot command")
+        };
+        assert_eq!(
+            config.custom_pricing_json,
+            Some(PathBuf::from("/tmp/custom.json"))
+        );
+        assert!(parse_args([OsString::from("--custom-pricing-json")]).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let error = run_snapshot(SnapshotConfig {
+            custom_pricing_json: Some(dir.path().join("missing.json")),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("读取自定义价格文件失败"));
+    }
+
+    #[test]
+    fn accepts_price_quote_parameters_and_defaults_to_cached_pricing() {
+        let config = quote_config(&[
+            "--platform",
+            "codex",
+            "--model",
+            "Exact-ID",
+            "--service-tier",
+            "fast",
+            "--home-dir",
+            "/tmp/home",
+            "--openai-pricing-markdown",
+            "/tmp/openai.md",
+            "--anthropic-pricing-markdown",
+            "/tmp/anthropic.md",
+            "--openrouter-pricing-json",
+            "/tmp/models.json",
+        ]);
+        assert_eq!(config.platform, "codex");
+        assert_eq!(config.model_id, "Exact-ID");
+        assert_eq!(config.service_tier, ServiceTier::Fast);
+        assert_eq!(config.pricing.home_dir, Some(PathBuf::from("/tmp/home")));
+        assert_eq!(
+            config.pricing.openai_pricing_markdown,
+            Some(PathBuf::from("/tmp/openai.md"))
+        );
+        assert_eq!(
+            config.pricing.anthropic_pricing_markdown,
+            Some(PathBuf::from("/tmp/anthropic.md"))
+        );
+        assert_eq!(
+            config.pricing.openrouter_pricing_json,
+            Some(PathBuf::from("/tmp/models.json"))
+        );
+        assert!(config.pricing.offline_pricing);
+        assert!(
+            quote_config(&[
+                "--platform",
+                "grok",
+                "--model",
+                "grok-code",
+                "--service-tier",
+                "standard",
+                "--offline-pricing"
+            ])
+            .pricing
+            .offline_pricing
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_or_invalid_quote_arguments() {
+        for args in [
+            vec![],
+            vec!["--platform", "codex"],
+            vec!["--platform", "codex", "--model", "gpt-5.6"],
+            vec![
+                "--platform",
+                "invalid",
+                "--model",
+                "gpt-5.6",
+                "--service-tier",
+                "standard",
+            ],
+            vec![
+                "--platform",
+                "codex",
+                "--model",
+                " ",
+                "--service-tier",
+                "standard",
+            ],
+            vec![
+                "--platform",
+                "codex",
+                "--model",
+                "gpt-5.6",
+                "--service-tier",
+                "any",
+            ],
+            vec![
+                "--platform",
+                "codex",
+                "--model",
+                "gpt-5.6",
+                "--service-tier",
+                "standard",
+                "--custom-pricing-json",
+                "prices.json",
+            ],
+            vec![
+                "--platform",
+                "codex",
+                "--model",
+                "gpt-5.6",
+                "--service-tier",
+                "standard",
+                "--home-dir",
+            ],
+        ] {
+            assert!(parse_args(
+                std::iter::once(OsString::from("price-quote"))
+                    .chain(args.into_iter().map(OsString::from))
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn quote_uses_fixture_rates_with_nullable_buckets_and_ignores_custom_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.json");
+        quote_fixture(&path);
+        let mut config = quote_config(&[
+            "--platform",
+            "codex",
+            "--model",
+            "gpt-exact-quote-fixture",
+            "--service-tier",
+            "standard",
+            "--home-dir",
+            dir.path().to_str().unwrap(),
+            "--openrouter-pricing-json",
+            path.to_str().unwrap(),
+        ]);
+        config.pricing.custom_pricing_json = Some(dir.path().join("ignored-missing-custom.json"));
+        let quote = automatic_price_quote(&config);
+        let rates = quote.rates.unwrap();
+        assert_eq!(rates.input_per_million, Some(2.0));
+        assert!((rates.cached_input_per_million.unwrap() - 0.2).abs() < 1e-12);
+        assert_eq!(rates.output_per_million, Some(10.0));
+        assert_eq!(rates.cache_write_per_million, None);
+        let encoded = serde_json::to_value(automatic_price_quote(&config)).unwrap();
+        assert_eq!(encoded["modelID"], "gpt-exact-quote-fixture");
+        assert!(encoded["rates"]["cacheWritePerMillion"].is_null());
+        config.model_id = "gpt-wholly-unknown-999".into();
+        assert!(automatic_price_quote(&config).rates.is_none());
+        config.platform = "grok".into();
+        assert!(automatic_price_quote(&config).rates.is_none());
+    }
+
+    #[test]
+    fn quote_fast_pricing_reads_the_same_codex_auth_mode_as_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex_home = dir.path().join(".codex");
+        std::fs::create_dir(&codex_home).unwrap();
+        std::fs::write(codex_home.join("auth.json"), br#"{"auth_mode":"chatgpt"}"#).unwrap();
+        let path = dir.path().join("models.json");
+        quote_fixture(&path);
+        let mut config = quote_config(&[
+            "--platform",
+            "codex",
+            "--model",
+            "gpt-5.6-sol",
+            "--service-tier",
+            "standard",
+            "--home-dir",
+            dir.path().to_str().unwrap(),
+            "--openrouter-pricing-json",
+            path.to_str().unwrap(),
+        ]);
+        let standard = automatic_price_quote(&config)
+            .rates
+            .unwrap()
+            .input_per_million
+            .unwrap();
+        config.service_tier = ServiceTier::Fast;
+        let fast = automatic_price_quote(&config)
+            .rates
+            .unwrap()
+            .input_per_million
+            .unwrap();
+        assert!((fast - standard * 2.5).abs() < 1e-12);
+        std::fs::write(codex_home.join("auth.json"), br#"{"auth_mode":"apikey"}"#).unwrap();
+        let api_fast = automatic_price_quote(&config)
+            .rates
+            .unwrap()
+            .input_per_million
+            .unwrap();
+        assert!((api_fast - standard * 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn antigravity_quotes_choose_the_matching_model_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.json");
+        quote_fixture(&path);
+        let mut config = quote_config(&[
+            "--platform",
+            "claude",
+            "--model",
+            "claude-sonnet-4-5",
+            "--service-tier",
+            "standard",
+            "--openrouter-pricing-json",
+            path.to_str().unwrap(),
+        ]);
+        let claude = automatic_price_quote(&config).rates.unwrap();
+        config.platform = "antigravity".into();
+        assert_eq!(automatic_price_quote(&config).rates.unwrap(), claude);
+        config.model_id = "gemini-2.5-flash".into();
+        assert!(automatic_price_quote(&config)
+            .rates
+            .unwrap()
+            .input_per_million
+            .is_some());
     }
 }
