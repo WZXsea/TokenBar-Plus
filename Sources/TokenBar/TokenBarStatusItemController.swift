@@ -2219,8 +2219,8 @@ enum StatusLabelRenderer {
     }
 }
 
-/// Unread count drawn as a pill over a provider icon's top-right corner. The ring
-/// and digits are knocked out so the count stays legible in template images.
+/// Unread count follows the menu bar foreground in template and colored images.
+/// The ring and digits are knocked out to retain contrast against the background.
 /// Longer counts growward over the icon, so the status label keeps its width.
 private struct StatusUnreadBadge {
     static let height: CGFloat = 9
@@ -2244,12 +2244,12 @@ private struct StatusUnreadBadge {
         guard let context = NSGraphicsContext.current else { return }
         let attributes: [NSAttributedString.Key: Any] = [
             .font: self.font,
-            .foregroundColor: NSColor.black,
+            .foregroundColor: NSColor.labelColor,
         ]
         let radius = rect.height / 2
         context.saveGraphicsState()
         defer { context.restoreGraphicsState() }
-        NSColor.black.setFill()
+        NSColor.labelColor.setFill()
         context.compositingOperation = .clear
         NSBezierPath(
             roundedRect: rect.insetBy(dx: -1, dy: -1),

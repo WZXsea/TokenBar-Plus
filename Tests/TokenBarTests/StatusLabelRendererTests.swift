@@ -66,6 +66,39 @@ struct StatusLabelRendererTests {
         return false
     }
 
+    @Test("Unread badge stays legible in light and dark menu bars with colored speeds")
+    func unreadBadgeAppearance() throws {
+        for (name, dark) in [(NSAppearance.Name.aqua, false), (.darkAqua, true)] {
+            let appearance = try #require(NSAppearance(named: name))
+            for tone in [StatusSpeedTone.active, .slow] {
+                var layout: StatusLabelLayout!
+                appearance.performAsCurrentDrawingAppearance {
+                    layout = StatusLabelRenderer.layout(contents: [
+                        StatusBarPlatformContent(scope: .codex, top: "54.8t/s", bottom: "433M",
+                                                 unreadCount: 1, speedTone: tone, topIsSpeed: true),
+                    ])
+                }
+                let raster = try #require(layout.image.representations.first as? NSBitmapImageRep)
+                let geometry = StatusLabelRenderer.geometry(platform: .codex, top: "54.8t/s",
+                                                           bottom: "433M", showsTrend: false)
+                let icon = try #require(geometry.iconRect)
+                // The badge extends past the icon; this column contains only its pill.
+                let scale = CGFloat(raster.pixelsWide) / layout.image.size.width
+                let x = Int((icon.maxX + 0.5) * scale)
+                let colors = (0..<raster.pixelsHigh).compactMap { y -> NSColor? in
+                    guard let color = raster.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          color.alphaComponent > 0.8 else { return nil }
+                    return color
+                }
+                #expect(!colors.isEmpty)
+                #expect(colors.allSatisfy { color in
+                    let brightness = (color.redComponent + color.greenComponent + color.blueComponent) / 3
+                    return dark ? brightness > 0.7 : brightness < 0.3
+                })
+            }
+        }
+    }
+
     @Test("Optional status rows center the remaining row and preserve the icon and mini chart")
     func optionalRowsAndChartGeometry() throws {
         let bottomOnly = StatusLabelRenderer.geometry(platform: .codex, top: nil, bottom: "80%", showsTrend: true)
