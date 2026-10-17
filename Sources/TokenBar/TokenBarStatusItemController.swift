@@ -305,14 +305,14 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             let platform = scope.platform
             let snapshot = self.model.activitySnapshot
             let quota = self.model.quotaState(for: platform).value
+            let activity = StatusBarSpeedActivity(snapshot: snapshot, platform: platform, now: now)
             let top = StatusBarMetricPresentation(
-                metric: self.settings.statusBarTopMetric, snapshot: snapshot, quota: quota, platform: platform)
+                metric: self.settings.statusBarTopMetric, snapshot: snapshot, quota: quota, platform: platform, speedActivity: activity)
             let bottom = StatusBarMetricPresentation(
-                metric: self.settings.statusBarBottomMetric, snapshot: snapshot, quota: quota, platform: platform)
+                metric: self.settings.statusBarBottomMetric, snapshot: snapshot, quota: quota, platform: platform, speedActivity: activity)
             let points = self.settings.showsStatusBarSpeedChart
                 ? SpeedTrendPresentation(snapshot: snapshot, platform: platform, limit: 30).points
                 : nil
-            let activity = StatusBarSpeedActivity(snapshot: snapshot, platform: platform, now: now)
             if activity.isActive, let deadline = activity.activeUntil { activeDeadlines.append(deadline) }
             let speedTone = StatusSpeedTone(isActive: activity.isActive, tokensPerSecond: activity.tokensPerSecond)
             let unread = self.unreadTasks.count(for: platform)

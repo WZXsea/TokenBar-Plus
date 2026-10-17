@@ -1019,7 +1019,7 @@ enum DemoPreviewRenderer {
     static func renderStatus(path: String) throws {
         let state = ProcessInfo.processInfo.environment["TOKENBAR_DEMO_STATUS_TONE"]
         let tone: StatusSpeedTone = state == "slow" ? .slow : state == "active" ? .active : .idle
-        let rate = state == "slow" ? "12.5t/s" : "58.3t/s"
+        let rate = state == "idle" ? "0t/s" : state == "slow" ? "12.5t/s" : "58.3t/s"
         let statusImage = StatusLabelRenderer.layout(
             contents: [StatusBarPlatformContent(
                 scope: .codex,
