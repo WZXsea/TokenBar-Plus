@@ -8,6 +8,21 @@ the locked dependency graph in
 [`Resources/ThirdPartyLicenses.html`](Resources/ThirdPartyLicenses.html). The
 same catalog is stored as `ThirdPartyLicenses.html` inside the app bundle.
 
+## TokenBar (upstream project)
+
+Project: [wuruoye/TokenBar](https://github.com/wuruoye/TokenBar)
+
+This repository is an independently maintained derivative of TokenBar, based on
+commit `e1b743466705a497a19149c9af5a7f465e47e902`. The original application,
+architecture, provider integrations, icons, and accounting infrastructure were
+created by wuruoye and upstream contributors. WZXsea's changes add the Chinese
+interface and the layout, speed, pricing, quota, and history improvements
+described in [README.md](README.md).
+
+The original MIT copyright and permission notice are preserved in [LICENSE](LICENSE).
+The additional notices below are retained from upstream. Platform names and
+logos identify their respective products and owners.
+
 ## CodexBar
 
 Project: [steipete/CodexBar](https://github.com/steipete/CodexBar)
