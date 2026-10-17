@@ -401,6 +401,61 @@ private struct DashboardScopeSelector: View {
     }
 }
 
+struct QuotaPlanBadgePresentation: Equatable {
+    enum Style: Equatable {
+        case premium
+        case standard
+    }
+
+    let title: String
+    let style: Style
+    let helpText: String
+
+    init?(snapshot: QuotaSnapshot?) {
+        guard let snapshot, let title = snapshot.planDisplayName else { return nil }
+        self.title = ["pro", "plus"].contains(title.lowercased()) ? title.uppercased() : title
+        self.style = title.caseInsensitiveCompare("Pro") == .orderedSame ? .premium : .standard
+        self.helpText = "套餐：\(title)" + (snapshot.planType.map { " · \($0)" } ?? "")
+    }
+}
+
+private struct QuotaPlanBadge: View {
+    let presentation: QuotaPlanBadgePresentation
+
+    var body: some View {
+        Group {
+            if self.presentation.style == .premium {
+                HStack(spacing: 3) {
+                    Image(systemName: "crown.fill")
+                        .font(.system(size: 8, weight: .semibold))
+                    Text(self.presentation.title)
+                        .font(.system(size: 9, weight: .heavy, design: .rounded))
+                }
+                .foregroundStyle(Color(red: 0.31, green: 0.20, blue: 0.04))
+                .padding(.horizontal, 6)
+                .frame(height: 17)
+                .background(LinearGradient(
+                    colors: [Color(red: 1, green: 0.94, blue: 0.70),
+                             Color(red: 0.91, green: 0.69, blue: 0.27),
+                             Color(red: 1, green: 0.88, blue: 0.54)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.55), lineWidth: 0.5))
+            } else {
+                Text(self.presentation.title)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .frame(height: 17)
+                    .background(Color.secondary.opacity(0.10), in: Capsule())
+            }
+        }
+        .lineLimit(1)
+        .help(self.presentation.helpText)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("套餐：\(self.presentation.title)")
+    }
+}
+
 private struct QuotaSummarySection: View {
     let state: DashboardSourceState<QuotaSnapshot>
     let usesWeekdayWeeklyPacing: Bool
@@ -415,6 +470,10 @@ private struct QuotaSummarySection: View {
             HStack {
                 Text("额度")
                     .font(.system(size: 12, weight: .semibold))
+                if let plan = QuotaPlanBadgePresentation(snapshot: self.state.value) {
+                    QuotaPlanBadge(presentation: plan)
+                        .frame(height: 14)
+                }
                 Spacer()
                 if self.state.errorMessage != nil {
                     Image(systemName: "exclamationmark.triangle.fill")

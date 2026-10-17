@@ -59,7 +59,9 @@ public struct CodexQuotaService: QuotaProviding, Sendable {
                 session: quota.session,
                 weekly: quota.weekly,
                 resetCredits: resetCredits,
-                updatedAt: quota.updatedAt)
+                updatedAt: quota.updatedAt,
+                origin: quota.origin,
+                planType: quota.planType)
         } catch is CancellationError {
             throw CancellationError()
         } catch {

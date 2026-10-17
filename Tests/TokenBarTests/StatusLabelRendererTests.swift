@@ -5,6 +5,67 @@ import TokenBarCore
 
 @MainActor
 struct StatusLabelRendererTests {
+    @Test("Live speed colors use a strict 20 tok/s threshold and idle stays neutral")
+    func liveSpeedTone() {
+        #expect(StatusSpeedTone(isActive: true, tokensPerSecond: 19.9) == .slow)
+        #expect(StatusSpeedTone(isActive: true, tokensPerSecond: 20) == .active)
+        #expect(StatusSpeedTone(isActive: true, tokensPerSecond: 58.3) == .active)
+        #expect(StatusSpeedTone(isActive: false, tokensPerSecond: 12) == .idle)
+        let invalidRates: [Double?] = [nil, 0, -1, .nan, .infinity]
+        for invalid in invalidRates {
+            #expect(StatusSpeedTone(isActive: true, tokensPerSecond: invalid) == .idle)
+        }
+    }
+
+    @Test("Rendered speed values and charts retain green or red colors while other metrics stay neutral")
+    func renderedSpeedColors() throws {
+        for (tone, isRed) in [(StatusSpeedTone.active, false), (.slow, true)] {
+            let text = StatusLabelRenderer.image(top: "18t/s", bottom: nil,
+                                                speedTone: tone, topIsSpeed: true)
+            let chart = StatusLabelRenderer.image(top: nil, bottom: nil, trendRates: [15, 18], speedTone: tone)
+            #expect(!text.isTemplate && !chart.isTemplate)
+            #expect(try self.hasSpeedColor(text, red: isRed))
+            #expect(try self.hasSpeedColor(chart, red: isRed))
+            let ordinary = StatusLabelRenderer.image(top: "58%", bottom: nil, speedTone: tone)
+            #expect(try !self.hasSpeedColor(ordinary, red: isRed))
+        }
+        #expect(StatusLabelRenderer.image(top: "18t/s", bottom: nil, speedTone: .idle,
+                                         topIsSpeed: true).isTemplate)
+    }
+
+    @Test("Mixed active and idle platform groups retain colors and correct click regions")
+    func mixedActivityColorsAndRegions() throws {
+        let layout = StatusLabelRenderer.layout(contents: [
+            StatusBarPlatformContent(scope: .codex, top: "58t/s", bottom: nil,
+                                     speedTone: .active, topIsSpeed: true),
+            StatusBarPlatformContent(scope: .claude, top: "12t/s", bottom: nil,
+                                     speedTone: .slow, topIsSpeed: true),
+            StatusBarPlatformContent(scope: .grok, top: "42t/s", bottom: nil),
+        ])
+        #expect(!layout.image.isTemplate)
+        let raster = try #require(layout.image.representations.first as? NSBitmapImageRep)
+        #expect(raster.pixelsHigh >= Int(layout.image.size.height * 2))
+        #expect(try self.hasSpeedColor(layout.image, red: false))
+        #expect(try self.hasSpeedColor(layout.image, red: true))
+        for region in layout.regions {
+            #expect(layout.scope(at: region.centerX) == region.scope)
+        }
+    }
+
+    private func hasSpeedColor(_ image: NSImage, red: Bool) throws -> Bool {
+        let data = try #require(image.tiffRepresentation)
+        let bitmap = try #require(NSBitmapImageRep(data: data))
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<bitmap.pixelsWide {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      color.alphaComponent > 0.4 else { continue }
+                if red, color.redComponent > color.greenComponent + 0.15 { return true }
+                if !red, color.greenComponent > color.redComponent + 0.15 { return true }
+            }
+        }
+        return false
+    }
+
     @Test("Optional status rows center the remaining row and preserve the icon and mini chart")
     func optionalRowsAndChartGeometry() throws {
         let bottomOnly = StatusLabelRenderer.geometry(platform: .codex, top: nil, bottom: "80%", showsTrend: true)

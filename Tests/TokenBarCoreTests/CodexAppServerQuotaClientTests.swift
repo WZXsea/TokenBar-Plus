@@ -79,6 +79,31 @@ struct CodexAppServerQuotaClientTests {
         #expect(messages[2]["id"] as? Int == 2)
     }
 
+    @Test("reads provider plan metadata while preserving returned windows", arguments: ["planType", "plan_type"])
+    func readsPlanType(key: String) async throws {
+        let payload = """
+        {"rateLimits":{"\(key)":"pro","primary":{"usedPercent":7,"windowDurationMins":300},"secondary":{"usedPercent":35,"windowDurationMins":10080}}}
+        """
+        let requester = StubRateLimitsRequester(result: .success(Data(payload.utf8)))
+        let snapshot = try await CodexAppServerQuotaClient(requester: requester).fetchQuota()
+        #expect(snapshot.planType == "pro")
+        #expect(snapshot.planDisplayName == "Pro")
+        #expect(snapshot.session?.windowMinutes == 300)
+        #expect(snapshot.weekly?.windowMinutes == 10_080)
+    }
+
+    @Test("recovers plan metadata from quota error bodies")
+    func recoversPlanType() async throws {
+        let message = """
+        decode error; body={"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":35,"limit_window_seconds":604800}}}
+        """
+        let requester = StubRateLimitsRequester(result: .failure(CodexAppServerError.requestFailed(message)))
+        let snapshot = try await CodexAppServerQuotaClient(requester: requester).fetchQuota()
+        #expect(snapshot.planType == "pro")
+        #expect(snapshot.session == nil)
+        #expect(snapshot.weekly?.usedPercent == 35)
+    }
+
     @Test("maps app-server primary and secondary windows")
     func mapsWindows() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)

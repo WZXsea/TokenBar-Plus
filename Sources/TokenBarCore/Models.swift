@@ -269,19 +269,40 @@ public struct QuotaSnapshot: Codable, Equatable, Sendable {
     public let resetCredits: QuotaResetCreditsSnapshot?
     public let updatedAt: Date
     public let origin: QuotaSnapshotOrigin?
+    public let planType: String?
 
     public init(
         session: QuotaWindowSnapshot?,
         weekly: QuotaWindowSnapshot?,
         resetCredits: QuotaResetCreditsSnapshot?,
         updatedAt: Date,
-        origin: QuotaSnapshotOrigin? = nil)
+        origin: QuotaSnapshotOrigin? = nil,
+        planType: String? = nil)
     {
         self.session = session
         self.weekly = weekly
         self.resetCredits = resetCredits
         self.updatedAt = updatedAt
         self.origin = origin
+        self.planType = planType
+    }
+
+    /// Uses provider metadata only; the presence of a quota window does not imply a plan.
+    public var planDisplayName: String? {
+        guard let planType else { return nil }
+        let display = planType.components(separatedBy: .whitespacesAndNewlines.union(.controlCharacters))
+            .filter { !$0.isEmpty }.joined(separator: " ")
+        guard !display.isEmpty else { return nil }
+        switch display.lowercased() {
+        case "free": return "Free"
+        case "plus": return "Plus"
+        case "pro", "prolite", "pro_lite", "pro-lite": return "Pro"
+        case "business": return "Business"
+        case "team": return "Team"
+        case "enterprise": return "Enterprise"
+        case "edu": return "Edu"
+        default: return String(display.prefix(48))
+        }
     }
 
     public var mostConstrainedWindow: (label: String, window: QuotaWindowSnapshot)? {

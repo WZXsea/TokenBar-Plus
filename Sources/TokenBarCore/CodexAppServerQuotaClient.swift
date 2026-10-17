@@ -11,7 +11,7 @@ struct CodexAppServerQuotaClient: Sendable {
     init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         initializeTimeout: TimeInterval = 8,
-        requestTimeout: TimeInterval = 4,
+        requestTimeout: TimeInterval = 15,
         now: @escaping @Sendable () -> Date = Date.init)
     {
         self.requester = CodexAppServerRPC(
@@ -56,7 +56,8 @@ struct CodexAppServerQuotaClient: Sendable {
             session: windows.session,
             weekly: windows.weekly,
             resetCredits: nil,
-            updatedAt: self.now())
+            updatedAt: self.now(),
+            planType: result.rateLimits.planType)
     }
 
     private static func recoverQuota(
@@ -77,7 +78,8 @@ struct CodexAppServerQuotaClient: Sendable {
             session: windows.session,
             weekly: windows.weekly,
             resetCredits: nil,
-            updatedAt: updatedAt)
+            updatedAt: updatedAt,
+            planType: body.planType ?? body.rateLimit?.planType)
     }
 
     private static func extractJSONObject(after marker: String, in text: String) -> String? {
@@ -210,15 +212,20 @@ private struct RateLimitsResult: Decodable {
 
     struct RateLimits: Decodable {
         let primary: RateLimitWindow?
+        let planType: String?
         let secondary: RateLimitWindow?
 
         private enum CodingKeys: String, CodingKey {
             case primary
+            case planType
+            case snakePlanType = "plan_type"
             case secondary
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.planType = (try? container.decodeIfPresent(String.self, forKey: .planType))
+                ?? (try? container.decodeIfPresent(String.self, forKey: .snakePlanType))
             self.primary = (try? container.decodeIfPresent(RateLimitWindow.self, forKey: .primary)) ?? nil
             self.secondary = (try? container.decodeIfPresent(RateLimitWindow.self, forKey: .secondary)) ?? nil
         }
@@ -227,22 +234,27 @@ private struct RateLimitsResult: Decodable {
 
 private struct RateLimitsErrorBody: Decodable {
     let rateLimit: RateLimit?
+    let planType: String?
 
     private enum CodingKeys: String, CodingKey {
         case rateLimit = "rate_limit"
+        case planType = "plan_type"
     }
 
     struct RateLimit: Decodable {
         let primaryWindow: Window?
+        let planType: String?
         let secondaryWindow: Window?
 
         private enum CodingKeys: String, CodingKey {
             case primaryWindow = "primary_window"
+            case planType = "plan_type"
             case secondaryWindow = "secondary_window"
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.planType = try? container.decodeIfPresent(String.self, forKey: .planType)
             self.primaryWindow = (try? container.decodeIfPresent(Window.self, forKey: .primaryWindow)) ?? nil
             self.secondaryWindow = (try? container.decodeIfPresent(Window.self, forKey: .secondaryWindow)) ?? nil
         }

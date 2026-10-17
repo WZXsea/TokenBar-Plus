@@ -59,7 +59,7 @@ struct StatusBarConfigurationTests {
             return content?.top == nil && content?.bottom == nil && content?.trendRates == nil
         }
         let layout = StatusLabelRenderer.layout(contents: controller.statusBarPresentationForTesting().contents)
-        #expect(layout.image.size.width > 0 && layout.image.isTemplate)
+        #expect(layout.image.size.width > 0)
         #expect(layout.regions.map(\.scope) == [.codex])
     }
 

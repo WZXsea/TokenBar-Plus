@@ -57,6 +57,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private let rootMenu = TokenBarMenu()
     private var statusLabelLayout: StatusLabelLayout?
     private var statusBarContents: [StatusBarPlatformContent] = []
+    private var statusSpeedExpiryTask: Task<Void, Never>?
     private var nextMenuScopeOverride: DashboardScope?
     private var sessionItems: [NSMenuItem] = []
     private var renderedSessionProjection: RenderedSessionProjection?
@@ -171,6 +172,8 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     func tearDown() {
+        self.statusSpeedExpiryTask?.cancel()
+        self.statusSpeedExpiryTask = nil
         self.activityFileWatcher?.stop()
         self.activityFileWatcher = nil
         self.unreadTasks.stop()
@@ -289,9 +292,15 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             showsAntigravity: self.settings.showsAntigravity)
     }
 
+    private static func isSpeedMetric(_ metric: TokenBarStatusMetric) -> Bool {
+        metric == .latestSpeed || metric == .todayAverageSpeed
+    }
+
     private func updateStatusButton() {
         guard let button = self.statusItem.button else { return }
         var toolTips: [String] = []
+        let now = Date()
+        var activeDeadlines: [Date] = []
         let contents = self.visibleScopes.map { scope in
             let platform = scope.platform
             let snapshot = self.model.activitySnapshot
@@ -303,6 +312,9 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             let points = self.settings.showsStatusBarSpeedChart
                 ? SpeedTrendPresentation(snapshot: snapshot, platform: platform, limit: 30).points
                 : nil
+            let activity = StatusBarSpeedActivity(snapshot: snapshot, platform: platform, now: now)
+            if activity.isActive, let deadline = activity.activeUntil { activeDeadlines.append(deadline) }
+            let speedTone = StatusSpeedTone(isActive: activity.isActive, tokensPerSecond: activity.tokensPerSecond)
             let unread = self.unreadTasks.count(for: platform)
             var details = [top.detailText, bottom.detailText].compactMap { $0 }
             if let points {
@@ -321,14 +333,33 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 + Self.unreadStatusText(unread).toolTip)
             return StatusBarPlatformContent(
                 scope: scope, top: top.compactText, bottom: bottom.compactText,
-                unreadCount: unread, trendRates: points?.map(\.tokensPerSecond))
+                unreadCount: unread, trendRates: points?.map(\.tokensPerSecond),
+                speedTone: speedTone,
+                topIsSpeed: Self.isSpeedMetric(self.settings.statusBarTopMetric),
+                bottomIsSpeed: Self.isSpeedMetric(self.settings.statusBarBottomMetric))
         }
+        self.scheduleStatusSpeedExpiry(at: activeDeadlines.min(), now: now)
         self.statusBarContents = contents
-        let layout = StatusLabelRenderer.layout(contents: contents)
+        var layout: StatusLabelLayout!
+        button.effectiveAppearance.performAsCurrentDrawingAppearance {
+            layout = StatusLabelRenderer.layout(contents: contents)
+        }
         self.statusLabelLayout = layout
         button.image = layout.image
         button.toolTip = toolTips.joined(separator: "\n")
         button.setAccessibilityLabel(toolTips.joined(separator: "。"))
+    }
+
+    private func scheduleStatusSpeedExpiry(at deadline: Date?, now: Date) {
+        self.statusSpeedExpiryTask?.cancel()
+        self.statusSpeedExpiryTask = nil
+        guard let deadline, deadline > now else { return }
+        let delay = deadline.timeIntervalSince(now)
+        self.statusSpeedExpiryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.updateStatusButton()
+        }
     }
 
     private static func unreadStatusText(_ count: Int) -> (toolTip: String, accessibility: String) {
@@ -1922,6 +1953,28 @@ struct StatusLabelLayout {
     }
 }
 
+enum StatusSpeedTone: Equatable, Sendable {
+    case idle
+    case active
+    case slow
+
+    init(isActive: Bool, tokensPerSecond: Double?) {
+        guard isActive, let rate = tokensPerSecond, rate.isFinite, rate > 0 else {
+            self = .idle
+            return
+        }
+        self = rate < StatusBarSpeedActivity.slowThreshold ? .slow : .active
+    }
+
+    var color: NSColor {
+        switch self {
+        case .idle: .labelColor
+        case .active: .systemGreen
+        case .slow: .systemRed
+        }
+    }
+}
+
 struct StatusBarPlatformContent: Equatable, Sendable {
     let scope: DashboardScope
     let top: String?
@@ -1929,13 +1982,20 @@ struct StatusBarPlatformContent: Equatable, Sendable {
     let unreadCount: Int
     /// nil hides the chart; an empty array draws the explicit empty indicator.
     let trendRates: [Double]?
+    let speedTone: StatusSpeedTone
+    let topIsSpeed: Bool
+    let bottomIsSpeed: Bool
 
-    init(scope: DashboardScope, top: String?, bottom: String?, unreadCount: Int = 0, trendRates: [Double]? = nil) {
+    init(scope: DashboardScope, top: String?, bottom: String?, unreadCount: Int = 0, trendRates: [Double]? = nil,
+         speedTone: StatusSpeedTone = .idle, topIsSpeed: Bool = false, bottomIsSpeed: Bool = false) {
         self.scope = scope
         self.top = top
         self.bottom = bottom
         self.unreadCount = unreadCount
         self.trendRates = trendRates
+        self.speedTone = speedTone
+        self.topIsSpeed = topIsSpeed
+        self.bottomIsSpeed = bottomIsSpeed
     }
 }
 
@@ -1992,7 +2052,8 @@ enum StatusLabelRenderer {
         let contents = contents.isEmpty ? [StatusBarPlatformContent(scope: .codex, top: nil, bottom: nil)] : contents
         let images = contents.map { content in
             self.image(platform: content.scope.platform, top: content.top, bottom: content.bottom,
-                       unreadCount: content.unreadCount, trendRates: content.trendRates)
+                       unreadCount: content.unreadCount, trendRates: content.trendRates,
+                       speedTone: content.speedTone, topIsSpeed: content.topIsSpeed, bottomIsSpeed: content.bottomIsSpeed)
         }
         let gap: CGFloat = 7
         let size = NSSize(width: images.map(\.size.width).reduce(0, +) + gap * CGFloat(max(0, images.count - 1)), height: 20)
@@ -2005,7 +2066,7 @@ enum StatusLabelRenderer {
             }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = contents.allSatisfy { $0.speedTone == .idle }
         var regions: [StatusLabelLayout.Region] = []
         var x: CGFloat = 0
         for (index, content) in contents.enumerated() {
@@ -2013,6 +2074,27 @@ enum StatusLabelRenderer {
                 scope: content.scope, startX: index == 0 ? 0 : x - gap / 2,
                 centerX: x + images[index].size.width / 2))
             x += images[index].size.width + gap
+        }
+        // Bake colored labels under the status button appearance; template labels
+        // continue to let AppKit supply the menu bar foreground.
+        if !image.isTemplate,
+           let bitmap = NSBitmapImageRep(
+               bitmapDataPlanes: nil, pixelsWide: Int(ceil(size.width * 2)),
+               pixelsHigh: Int(ceil(size.height * 2)), bitsPerSample: 8,
+               samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+           let context = NSGraphicsContext(bitmapImageRep: bitmap)
+        {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            context.cgContext.scaleBy(x: 2, y: 2)
+            image.draw(in: NSRect(origin: .zero, size: size))
+            NSGraphicsContext.restoreGraphicsState()
+            bitmap.size = size
+            let coloredImage = NSImage(size: size)
+            coloredImage.addRepresentation(bitmap)
+            coloredImage.isTemplate = false
+            return StatusLabelLayout(image: coloredImage, regions: regions)
         }
         return StatusLabelLayout(image: image, regions: regions)
     }
@@ -2052,7 +2134,8 @@ enum StatusLabelRenderer {
 
     static func image(
         platform: TokenPlatform? = nil, top: String?, bottom: String?, unreadCount: Int = 0,
-        trendRates: [Double]? = nil) -> NSImage
+        trendRates: [Double]? = nil, speedTone: StatusSpeedTone = .idle,
+        topIsSpeed: Bool = false, bottomIsSpeed: Bool = false) -> NSImage
     {
         let geometry = self.geometry(platform: platform, top: top, bottom: bottom, showsTrend: trendRates != nil)
         let icon = platform.flatMap { PlatformStatusIcon.image(for: $0) }
@@ -2062,7 +2145,14 @@ enum StatusLabelRenderer {
         let attributes = self.textAttributes
         let image = NSImage(size: geometry.size, flipped: false) { _ in
             if let icon, let rect = geometry.iconRect {
-                icon.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                let tinted = NSImage(size: icon.size, flipped: false) { _ in
+                    let bounds = NSRect(origin: .zero, size: icon.size)
+                    icon.draw(in: bounds)
+                    NSColor.labelColor.setFill()
+                    bounds.fill(using: .sourceAtop)
+                    return true
+                }
+                tinted.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
                 if let badge {
                     badge.draw(in: NSRect(
                         x: rect.maxX + StatusUnreadBadge.iconOverhang - badge.width,
@@ -2071,13 +2161,21 @@ enum StatusLabelRenderer {
                 }
             }
             if let rates = trendRates, let rect = geometry.chartRect {
-                self.drawTrend(rates: rates, in: rect)
+                self.drawTrend(rates: rates, in: rect, color: speedTone.color)
             }
-            if let top, let rect = geometry.topRect { (top as NSString).draw(in: rect, withAttributes: attributes) }
-            if let bottom, let rect = geometry.bottomRect { (bottom as NSString).draw(in: rect, withAttributes: attributes) }
+            if let top, let rect = geometry.topRect {
+                var textAttributes = attributes
+                if topIsSpeed { textAttributes[.foregroundColor] = speedTone.color }
+                (top as NSString).draw(in: rect, withAttributes: textAttributes)
+            }
+            if let bottom, let rect = geometry.bottomRect {
+                var textAttributes = attributes
+                if bottomIsSpeed { textAttributes[.foregroundColor] = speedTone.color }
+                (bottom as NSString).draw(in: rect, withAttributes: textAttributes)
+            }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = speedTone == .idle
         return image
     }
 
@@ -2086,25 +2184,25 @@ enum StatusLabelRenderer {
         paragraph.alignment = .left
         paragraph.lineBreakMode = .byTruncatingTail
         return [.font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .bold),
-                .foregroundColor: NSColor.black, .paragraphStyle: paragraph]
+                .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
     }
 
     private static func visibleText(_ value: String?) -> String? {
         value.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
     }
 
-    private static func drawTrend(rates: [Double], in rect: NSRect) {
+    private static func drawTrend(rates: [Double], in rect: NSRect, color: NSColor) {
         let points = StatusSpeedChartGeometry.points(rates: rates, in: rect.insetBy(dx: 1.5, dy: 1.5))
         guard let first = points.first else {
             let dash = "—" as NSString
             let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 8), .foregroundColor: NSColor.black.withAlphaComponent(0.45)]
+                .font: NSFont.systemFont(ofSize: 8), .foregroundColor: NSColor.labelColor.withAlphaComponent(0.45)]
             let size = dash.size(withAttributes: attributes)
             dash.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2), withAttributes: attributes)
             return
         }
-        NSColor.black.setStroke()
-        NSColor.black.setFill()
+        color.setStroke()
+        color.setFill()
         if points.count > 1 {
             let line = NSBezierPath()
             line.lineWidth = 1.1

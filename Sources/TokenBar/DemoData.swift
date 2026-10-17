@@ -9,7 +9,7 @@ struct DemoQuotaProvider: QuotaProviding {
 
     func fetchQuota() async throws -> QuotaSnapshot {
         let now = Date()
-        let object: [String: Any] = [
+        var object: [String: Any] = [
             "session": [
                 "usedPercent": 37,
                 "windowMinutes": 300,
@@ -34,6 +34,12 @@ struct DemoQuotaProvider: QuotaProviding {
             ],
             "updatedAt": now.timeIntervalSinceReferenceDate,
         ]
+        if let plan = ProcessInfo.processInfo.environment["TOKENBAR_DEMO_PLAN"] {
+            object["planType"] = plan
+            if ["pro", "prolite", "pro_lite", "pro-lite"].contains(plan.lowercased()) {
+                object.removeValue(forKey: "session")
+            }
+        }
         return try JSONDecoder().decode(QuotaSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
     }
 }
@@ -1011,13 +1017,18 @@ enum DemoPreviewRenderer {
     }
 
     static func renderStatus(path: String) throws {
+        let state = ProcessInfo.processInfo.environment["TOKENBAR_DEMO_STATUS_TONE"]
+        let tone: StatusSpeedTone = state == "slow" ? .slow : state == "active" ? .active : .idle
+        let rate = state == "slow" ? "12.5t/s" : "58.3t/s"
         let statusImage = StatusLabelRenderer.layout(
             contents: [StatusBarPlatformContent(
                 scope: .codex,
-                top: "132M",
-                bottom: "61%",
+                top: state == nil ? "132M" : rate,
+                bottom: state == nil ? "61%" : "417M",
                 unreadCount: 2,
-                trendRates: [42, 48, 38, 61, 65, 57, 81, 69, 75, 52, 68, 72, 64, 77, 83, 70])]).image
+                trendRates: [42, 48, 38, 61, 65, 57, 81, 69, 75, 52, 68, 72, 64, 77, 83, 70],
+                speedTone: tone,
+                topIsSpeed: state != nil)]).image
         let padding: CGFloat = 4
         let canvas = DemoRowPreviewCanvas(frame: NSRect(
             x: 0,
@@ -1031,7 +1042,7 @@ enum DemoPreviewRenderer {
             height: statusImage.size.height))
         imageView.image = statusImage
         imageView.imageScaling = .scaleNone
-        imageView.contentTintColor = .labelColor
+        imageView.contentTintColor = statusImage.isTemplate ? .labelColor : nil
         canvas.addSubview(imageView)
         canvas.layoutSubtreeIfNeeded()
 

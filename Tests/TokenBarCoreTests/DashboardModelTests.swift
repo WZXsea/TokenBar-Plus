@@ -449,6 +449,25 @@ struct DashboardModelTests {
         #expect(model.quota.value?.origin == .claudeDesktop)
     }
 
+    @Test("quota normalization preserves the provider plan")
+    @MainActor
+    func preservesProviderPlan() async {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let snapshot = QuotaSnapshot(
+            session: nil,
+            weekly: QuotaWindowSnapshot(usedPercent: 35, windowMinutes: 10_080, resetsAt: nil),
+            resetCredits: nil, updatedAt: now, planType: "pro")
+        let model = DashboardModel(
+            quotaService: QueueQuotaProvider([.success(snapshot)]),
+            activityService: QueueActivityProvider([]), cache: nil,
+            quotaRefreshInterval: .seconds(300), activityRefreshInterval: .seconds(300),
+            sleep: { _ in throw CancellationError() }, now: { now })
+        await model.refreshQuota()
+        #expect(model.quota.value?.planType == "pro")
+        #expect(model.quota.value?.planDisplayName == "Pro")
+        #expect(model.quota.value?.session == nil)
+    }
+
     @Test("missing reset metadata retains a compatible future reset date")
     @MainActor
     func retainsCompatibleFutureReset() async {
