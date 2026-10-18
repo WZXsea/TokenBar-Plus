@@ -548,7 +548,41 @@ struct DemoActivityProvider: ActivityProviding {
                 includesData: memoryIncludesData,
                 hasOtlpConnection: memoryHasOtlpConnection),
         ]
-        return try JSONDecoder().decode(ActivitySnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        // This path transforms only the synthetic object above. It never opens
+        // a provider database, transcript, cache, or pricing file.
+        let previewObject = demoEnvironment["TOKENBAR_DEMO_SCOPE"] == "zcode"
+            ? self.zcodePreviewObject(object) : object
+        return try JSONDecoder().decode(ActivitySnapshot.self, from: JSONSerialization.data(withJSONObject: previewObject))
+    }
+
+    private func zcodePreviewObject(_ object: [String: Any]) -> [String: Any] {
+        func transform(_ value: Any) -> Any {
+            if let values = value as? [Any] { return values.map(transform) }
+            if let dictionary = value as? [String: Any] {
+                var mapped = dictionary.mapValues(transform)
+                if dictionary["platform"] as? String == "codex" {
+                    mapped["platform"] = "zcode"
+                    if let duration = dictionary["modelDurationMs"] as? Int,
+                       let firstToken = dictionary["timeToFirstTokenMs"] as? Int {
+                        mapped["modelDurationMs"] = duration + firstToken
+                    }
+                }
+                // Fixture models deliberately have no asserted billing rate.
+                if mapped["costUsd"] != nil { mapped["costUsd"] = 0 }
+                if mapped["costSource"] != nil { mapped["costSource"] = "unknown" }
+                mapped.removeValue(forKey: "tokenCosts")
+                return mapped
+            }
+            if let text = value as? String {
+                switch text {
+                case "gpt-5": return "gpt-6.1-sol"
+                case "gpt-5-mini": return "gemini-3.8-flash"
+                default: return text
+                }
+            }
+            return value
+        }
+        return transform(object) as? [String: Any] ?? object
     }
 
     private func makeMemoryUsage(
@@ -740,10 +774,13 @@ enum DemoPreviewRenderer {
         let showsGrok = ProcessInfo.processInfo.environment["TOKENBAR_DEMO_SHOWS_GROK"] != "0"
         let showsAntigravity = ProcessInfo.processInfo
             .environment["TOKENBAR_DEMO_SHOWS_ANTIGRAVITY"] != "0"
+        let showsZCode = ProcessInfo.processInfo.environment["TOKENBAR_DEMO_SCOPE"] == "zcode"
+            && ProcessInfo.processInfo.environment["TOKENBAR_DEMO_SHOWS_ZCODE"] != "0"
         let visibleScopes = DashboardScope.visibleScopes(
             showsClaude: showsClaude,
             showsGrok: showsGrok,
-            showsAntigravity: showsAntigravity)
+            showsAntigravity: showsAntigravity,
+            showsZCode: showsZCode)
         if !visibleScopes.contains(model.scope) {
             model.scope = .codex
         }
@@ -751,19 +788,21 @@ enum DemoPreviewRenderer {
             .map { value in
                 value.split(separator: ",")
                     .compactMap { TokenBarDashboardSection(rawValue: String($0)) }
-            } ?? TokenBarSettings.shared.visibleDashboardSections
+            } ?? DashboardSummaryView.defaultSections
         let height = DashboardSummaryView.preferredHeight(
             quota: model.quotaState(for: model.scope.platform).value,
             providesQuota: model.providesQuota(for: model.scope.platform),
             showsClaude: showsClaude,
             showsGrok: showsGrok,
             showsAntigravity: showsAntigravity,
+            showsZCode: showsZCode,
             sections: sections)
         let content = DashboardSummaryView(
             model: model,
             showsClaude: showsClaude,
             showsGrok: showsGrok,
             showsAntigravity: showsAntigravity,
+            showsZCode: showsZCode,
             usesWeekdayWeeklyPacing: false,
             accentColor: .purple,
             sections: sections)

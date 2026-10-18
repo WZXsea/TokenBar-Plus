@@ -90,7 +90,7 @@ impl CustomPricing {
             let platform = matching_key(&rule.platform);
             if !matches!(
                 platform.as_str(),
-                "codex" | "claude" | "grok" | "antigravity"
+                "codex" | "claude" | "grok" | "antigravity" | "zcode"
             ) {
                 return Err(format!("自定义价格平台无效：{}", rule.platform));
             }

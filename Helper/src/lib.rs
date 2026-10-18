@@ -19,6 +19,7 @@ pub mod memory;
 pub mod pricing;
 pub mod openrouter;
 pub mod usage;
+pub mod zcode;
 
 pub use usage::StatisticsTimeZone;
 
@@ -850,7 +851,7 @@ pub fn build_snapshot_with_platform_resets(
         .iter()
         .map(|message| message.client.clone())
         .collect::<BTreeSet<_>>();
-    let known_platforms = ["codex", "claude", "grok", "antigravity"];
+    let known_platforms = ["codex", "claude", "grok", "antigravity", "zcode"];
     let mut platforms = known_platforms
         .iter()
         .map(|platform| (*platform).to_string())

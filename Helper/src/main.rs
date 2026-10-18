@@ -35,7 +35,9 @@ use tokenbar_helper::{
 };
 
 const DEFAULT_DAYS: usize = 30;
-const USAGE: &str = "usage: tokenbar-helper [--days COUNT] [--end-date YYYY-MM-DD] [--home-dir PATH] [--statistics-timezone utc|local] [--weekly-reset-ms MS] [--claude-weekly-reset-ms MS] [--grok-weekly-reset-ms MS] [--antigravity-weekly-reset-ms MS] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--custom-pricing-json PATH] [--memory-database PATH] [--offline-pricing]\n       tokenbar-helper price-quote --platform codex|claude|grok|antigravity --model ID --service-tier standard|fast [--home-dir PATH] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--offline-pricing]\n       tokenbar-helper request-detail [--platform codex|claude|grok|antigravity] --session-path PATH --start-ms MS --end-ms MS\n       tokenbar-helper memory-receiver --database PATH [--status-file PATH] [--port PORT] [--parent-pid PID]";
+use tokenbar_helper::zcode::{parse_local_zcode_messages, load_zcode_session_titles, extract_request_detail as extract_zcode_request_detail, LocalParseOptions as ZCodeParseOptions};
+
+const USAGE: &str = "usage: tokenbar-helper [--days COUNT] [--end-date YYYY-MM-DD] [--home-dir PATH] [--statistics-timezone utc|local] [--weekly-reset-ms MS] [--claude-weekly-reset-ms MS] [--grok-weekly-reset-ms MS] [--antigravity-weekly-reset-ms MS] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--custom-pricing-json PATH] [--memory-database PATH] [--offline-pricing]\n       tokenbar-helper price-quote --platform codex|claude|grok|antigravity|zcode --model ID --service-tier standard|fast [--home-dir PATH] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--offline-pricing]\n       tokenbar-helper request-detail [--platform codex|claude|grok|antigravity|zcode] --session-path PATH --start-ms MS --end-ms MS\n       tokenbar-helper memory-receiver --database PATH [--status-file PATH] [--port PORT] [--parent-pid PID]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotConfig {
@@ -125,6 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         config.end_ms,
                     )
                 }
+                "zcode" => extract_zcode_request_detail(&config.session_path, config.start_ms, config.end_ms),
                 "grok" => extract_grok_request_detail(
                     &config.session_path,
                     config.start_ms,
@@ -242,6 +245,9 @@ fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
     )
     .map_err(io::Error::other)?;
     session_titles.extend(load_claude_session_titles(&claude_messages));
+    let zcode_options=ZCodeParseOptions {home_dir:home_dir.clone(),use_env_roots,since:Some(parse_first_day.format("%Y-%m-%d").to_string()),until:Some(parse_last_day.format("%Y-%m-%d").to_string())};
+    let mut zcode_messages=parse_local_zcode_messages(zcode_options.clone()).map_err(io::Error::other)?;
+    session_titles.extend(load_zcode_session_titles(&zcode_options));
     let antigravity_home_dir = home_dir.clone();
     let grok_messages = parse_local_grok_messages(GrokParseOptions {
         home_dir,
@@ -262,6 +268,11 @@ fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
         .as_deref()
         .and_then(|path| GooglePricing::from_openrouter_catalog_file(path, today).ok())
         .unwrap_or_else(|| GooglePricing::bundled_for_date(today));
+    for message in &mut zcode_messages {
+        if let Some(costs)=zcode_token_costs(&message.model_id,&message.tokens,&pricing,&anthropic_pricing,&google_pricing,message.service_tier) {
+            message.cost=costs.total();message.token_costs=Some(costs);message.cost_source=tokenbar_helper::usage::CostSource::Estimated;
+        }
+    }
     let antigravity_messages = parse_local_antigravity_messages(
         antigravity_options.clone(),
         &anthropic_pricing,
@@ -273,6 +284,7 @@ fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
     messages.extend(claude_messages);
     messages.extend(grok_messages);
     messages.extend(antigravity_messages);
+    messages.extend(zcode_messages);
     if let Some(pricing) = custom_pricing {
         pricing.apply(&mut messages);
     }
@@ -358,6 +370,7 @@ fn automatic_price_quote(config: &PriceQuoteConfig) -> PriceQuote {
             config.service_tier,
         ),
         "claude" => anthropic.calculate_token_costs(&config.model_id, tokens),
+        "zcode" => zcode_token_costs(&config.model_id,tokens,&codex,&anthropic,&google,config.service_tier),
         "antigravity" => {
             let model = config.model_id.trim().to_ascii_lowercase();
             if model.starts_with("claude") || model.starts_with("anthropic/claude") {
@@ -374,6 +387,13 @@ fn automatic_price_quote(config: &PriceQuoteConfig) -> PriceQuote {
         service_tier: config.service_tier,
         rates,
     }
+}
+
+fn zcode_token_costs(model_id:&str,tokens:&tokenbar_helper::usage::TokenBreakdown,codex:&CodexPricing,anthropic:&AnthropicPricing,google:&GooglePricing,tier:ServiceTier)->Option<tokenbar_helper::usage::TokenCostBreakdown>{
+    let model=model_id.trim();
+    let model=if let Some((route,id))=model.split_once('/') {if matches!(route.to_ascii_lowercase().as_str(),"codex"|"antigravity"|"workbuddy"|"openai"|"anthropic"|"google"){id}else{return None}}else{model};
+    let normalized=model.to_ascii_lowercase();
+    if normalized.starts_with("claude"){anthropic.calculate_token_costs(model,tokens)}else if normalized.starts_with("gpt-"){codex.calculate_token_costs_with_service_tier(model,None,tokens,tier)}else if normalized.starts_with("gemini-"){google.calculate_token_costs(model,tokens)}else{None}
 }
 
 fn load_openrouter_pricing(config: &SnapshotConfig) -> tokenbar_helper::openrouter::CatalogLoad {
@@ -606,8 +626,8 @@ fn parse_price_quote_args(
             Some("--platform") => {
                 let value = args.next().ok_or("--platform requires a value")?;
                 let value = value.to_str().ok_or("--platform must be valid UTF-8")?;
-                if !matches!(value, "codex" | "claude" | "grok" | "antigravity") {
-                    return Err("--platform must be codex, claude, grok, or antigravity".into());
+                if !matches!(value, "codex" | "claude" | "grok" | "antigravity" | "zcode") {
+                    return Err("--platform must be codex, claude, grok, antigravity, or zcode".into());
                 }
                 platform = Some(value.to_string());
             }
@@ -730,9 +750,9 @@ fn parse_request_detail_args(
             Some("--platform") => {
                 let value = args.next().ok_or("--platform requires a value")?;
                 let value = value.to_str().ok_or("--platform must be valid UTF-8")?;
-                if !matches!(value, "codex" | "claude" | "grok" | "antigravity") {
+                if !matches!(value, "codex" | "claude" | "grok" | "antigravity" | "zcode") {
                     return Err(
-                        "--platform must be codex, claude, grok, or antigravity".to_string()
+                        "--platform must be codex, claude, grok, antigravity, or zcode".to_string()
                     );
                 }
                 platform = value.to_string();
@@ -780,6 +800,14 @@ fn parse_request_detail_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zcode_routed_prices_preserve_unknown_models() {
+        let codex=CodexPricing::bundled();let today=chrono::NaiveDate::from_ymd_opt(2026,10,18).unwrap();let anthropic=AnthropicPricing::bundled_for_date(today);let google=GooglePricing::bundled_for_date(today);let tokens=tokenbar_helper::usage::TokenBreakdown{input:1000,..Default::default()};
+        assert_eq!(zcode_token_costs("codex/gpt-5.4-mini",&tokens,&codex,&anthropic,&google,ServiceTier::Standard),zcode_token_costs("gpt-5.4-mini",&tokens,&codex,&anthropic,&google,ServiceTier::Standard));
+        assert!(zcode_token_costs("GLM-5.3-Flash",&tokens,&codex,&anthropic,&google,ServiceTier::Standard).is_none());
+        assert!(parse_price_quote_args([OsString::from("--platform"),OsString::from("zcode"),OsString::from("--model"),OsString::from("GLM-5.3-Flash"),OsString::from("--service-tier"),OsString::from("standard")].into_iter()).is_ok());
+    }
 
     #[test]
     fn zero_arguments_use_the_thirty_day_default() {

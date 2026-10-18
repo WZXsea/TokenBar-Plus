@@ -250,7 +250,7 @@ public final class ModelPricingStore {
     }
 
     private static func validated(_ rules: [ModelPriceOverride]) throws -> [ModelPriceOverride] {
-        let platforms: Set<TokenPlatform> = [.codex, .claude, .grok, .antigravity]
+        let platforms: Set<TokenPlatform> = [.codex, .claude, .grok, .antigravity, .zcode]
         var ids: Set<UUID> = []
         var targets: Set<Target> = []
         return try rules.map { original in

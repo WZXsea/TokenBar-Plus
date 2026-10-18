@@ -54,6 +54,16 @@ public struct SpeedSummaryPresentation: Equatable, Sendable {
         self.todayTokensPerSecond = todayTokensPerSecond
     }
 
+    public static func title(for platform: TokenPlatform) -> String {
+        platform == .zcode ? "响应速率" : "生成速度"
+    }
+
+    public static func helpText(for platform: TokenPlatform) -> String {
+        platform == .zcode
+            ? "输出 Token ÷ 模型请求总耗时，含首 Token 等待；工具执行耗时独立。输出包含推理 Token。"
+            : "速率统计输出与推理 token，按实际请求耗时加权。曲线按模型分别绘制；悬停查看原始样本。"
+    }
+
     public var latestSpeedValueText: String {
         Self.rateValueText(self.latestSample?.tokensPerSecond)
     }

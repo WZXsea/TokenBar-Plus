@@ -28,6 +28,7 @@ struct SessionLauncher {
     private let resolveClaudeDesktopSessionID: (String) -> String?
     private let launchGrokSession: (SessionSummary) -> Bool
     private let launchAntigravityWorkspace: (String) -> Bool
+    private let launchZCodeApplication: () -> Bool
 
     init(
         openURL: @escaping (URL) -> Bool = { NSWorkspace.shared.open($0) },
@@ -39,15 +40,29 @@ struct SessionLauncher {
         },
         launchAntigravityWorkspace: @escaping (String) -> Bool = {
             AntigravityWorkspaceLauncher().open(workspacePath: $0)
+        },
+        launchZCodeApplication: @escaping () -> Bool = {
+            guard let application = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "dev.zcode.app") else {
+                return false
+            }
+            return NSWorkspace.shared.open(application)
         })
     {
         self.openURL = openURL
         self.resolveClaudeDesktopSessionID = resolveClaudeDesktopSessionID
         self.launchGrokSession = launchGrokSession
         self.launchAntigravityWorkspace = launchAntigravityWorkspace
+        self.launchZCodeApplication = launchZCodeApplication
     }
 
     func open(_ session: SessionSummary) throws {
+        // ZCode currently opens at application level; no per-session URL is assumed.
+        if session.platformID == .zcode {
+            guard self.launchZCodeApplication() else {
+                throw SessionLauncherError.applicationUnavailable(.zcode)
+            }
+            return
+        }
         if session.platformID == .grok {
             guard self.launchGrokSession(session) else {
                 throw SessionLauncherError.applicationUnavailable(.grok)

@@ -289,7 +289,8 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         DashboardScope.visibleScopes(
             showsClaude: self.settings.showsClaude,
             showsGrok: self.settings.showsGrok,
-            showsAntigravity: self.settings.showsAntigravity)
+            showsAntigravity: self.settings.showsAntigravity,
+            showsZCode: self.settings.showsZCode)
     }
 
     private static func isSpeedMetric(_ metric: TokenBarStatusMetric) -> Bool {
@@ -323,11 +324,17 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                     ? "等待速度样本"
                     : "按轮次顺序等距连接；统计输出与推理 token，按模型请求计时")
             }
+            if platform == .zcode, points != nil,
+               !Self.isSpeedMetric(self.settings.statusBarTopMetric),
+               !Self.isSpeedMetric(self.settings.statusBarBottomMetric) {
+                details.append(SpeedSummaryPresentation.helpText(for: platform))
+            }
             let name = switch scope {
             case .codex: "Codex"
             case .claude: "Claude Code"
             case .grok: "Grok Build"
             case .antigravity: "Antigravity"
+            case .zcode: "ZCode"
             }
             toolTips.append(name + (details.isEmpty ? "" : " · " + details.joined(separator: " · "))
                 + Self.unreadStatusText(unread).toolTip)
@@ -451,6 +458,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             _ = self.settings.showsClaude
             _ = self.settings.showsGrok
             _ = self.settings.showsAntigravity
+            _ = self.settings.showsZCode
             _ = self.settings.usesWeekdayWeeklyPacing
             _ = self.settings.showsFullRequestContentOnHover
             _ = self.settings.monitorsCodexMemory
@@ -561,7 +569,8 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 for: section,
                 quota: quota,
                 showsResetCredits: false,
-                showsWeeklyUsage: section == .quota && self.mergesWeeklyUsageIntoQuota))
+                showsWeeklyUsage: section == .quota && self.mergesWeeklyUsageIntoQuota,
+                providesQuota: self.model.providesQuota(for: scope.platform)))
         }
         self.summaryItems[.quota]?.isHidden = !self.model.providesQuota(for: scope.platform)
         self.summaryItems[.weeklyReset]?.isHidden = !self.model.providesQuota(for: scope.platform)
@@ -615,12 +624,14 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         let headerHeight = DashboardLayout.headerHeight(
             showsClaude: self.settings.showsClaude,
             showsGrok: self.settings.showsGrok,
-            showsAntigravity: self.settings.showsAntigravity)
+            showsAntigravity: self.settings.showsAntigravity,
+            showsZCode: self.settings.showsZCode)
         let header = DashboardHeaderView(
             model: self.model,
             showsClaude: self.settings.showsClaude,
             showsGrok: self.settings.showsGrok,
             showsAntigravity: self.settings.showsAntigravity,
+            showsZCode: self.settings.showsZCode,
             accentColor: accentColor,
             onSelectScope: { [weak self] scope in
                 self?.selectScope(scope)
@@ -687,7 +698,8 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 for: section,
                 quota: self.model.quotaState(for: self.model.scope.platform).value,
                 showsResetCredits: false,
-                showsWeeklyUsage: section == .quota && self.mergesWeeklyUsageIntoQuota)
+                showsWeeklyUsage: section == .quota && self.mergesWeeklyUsageIntoQuota,
+                providesQuota: self.model.providesQuota(for: self.model.scope.platform))
             let content = DashboardSectionContentView(
                 section: section,
                 model: self.model,
@@ -1133,8 +1145,9 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             rate: nil)
         row.toolTip = isRemote
             ? "\(title)\n\(session.menuDetail)\n结束于 \(time)\n同步会话（仅查看）· 悬停查看轮次"
-            : "\(title)\n\(session.menuDetail)\n结束于 \(time)\n点击在 "
-                + "\(session.platformID.displayName) 中打开 · 悬停查看轮次"
+            : "\(title)\n\(session.menuDetail)\n结束于 \(time)\n"
+                + (session.platformID == .zcode ? "点击打开 ZCode 应用" : "点击在 \(session.platformID.displayName) 中打开")
+                + " · 悬停查看轮次"
         row.onActivate = isRemote ? nil : { [weak self, weak item] in
             guard let self else { return }
             item?.menu?.cancelTracking()
@@ -2286,6 +2299,24 @@ enum PlatformStatusIcon {
     static func image(for platform: TokenPlatform) -> NSImage? {
         if let cached = self.cache[platform] {
             return cached
+        }
+        if platform == .zcode {
+            let image = NSImage(size: self.size, flipped: false) { rect in
+                let path = NSBezierPath()
+                path.lineWidth = 2.1
+                path.lineCapStyle = .round
+                path.lineJoinStyle = .round
+                path.move(to: NSPoint(x: rect.minX + 3, y: rect.maxY - 3))
+                path.line(to: NSPoint(x: rect.maxX - 3, y: rect.maxY - 3))
+                path.line(to: NSPoint(x: rect.minX + 3, y: rect.minY + 3))
+                path.line(to: NSPoint(x: rect.maxX - 3, y: rect.minY + 3))
+                NSColor.labelColor.setStroke()
+                path.stroke()
+                return true
+            }
+            image.isTemplate = true
+            self.cache[platform] = image
+            return image
         }
         if let symbolName = self.symbolName(for: platform),
            let symbol = NSImage(

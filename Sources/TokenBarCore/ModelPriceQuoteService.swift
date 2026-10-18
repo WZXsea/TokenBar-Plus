@@ -47,7 +47,7 @@ public struct ModelPriceQuoteService: ModelPriceQuoting, Sendable {
         let modelID = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !modelID.isEmpty, modelID.unicodeScalars.count <= 200,
               modelID.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
-              [TokenPlatform.codex, .claude, .grok, .antigravity].contains(platform)
+              [TokenPlatform.codex, .claude, .grok, .antigravity, .zcode].contains(platform)
         else { throw ModelPriceQuoteError.invalidModel }
         let helper = try self.resolveHelper()
         async let openAIURL = self.openAI?.refreshIfNeeded()

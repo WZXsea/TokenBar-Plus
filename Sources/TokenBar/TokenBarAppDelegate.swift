@@ -215,7 +215,7 @@ final class TokenBarAppDelegate: NSObject, NSApplicationDelegate {
     var observedPricingModels: [ObservedPricingModel] {
         guard let snapshot = self.model.activitySnapshot else { return [] }
         var models: [String: ObservedPricingModel] = [:]
-        let supported: Set<TokenPlatform> = [.codex, .claude, .grok, .antigravity]
+        let supported: Set<TokenPlatform> = [.codex, .claude, .grok, .antigravity, .zcode]
         func insert(_ modelID: String, platform: TokenPlatform) {
             let modelID = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
             guard supported.contains(platform), !modelID.isEmpty, modelID != "unknown" else { return }

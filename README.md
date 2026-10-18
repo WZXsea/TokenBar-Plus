@@ -40,6 +40,26 @@ TokenBar Plus 是 [WZXsea](https://github.com/WZXsea) 基于 [wuruoye / TokenBar
 | 模型价格 | 按平台、模型和服务档位编辑单价，用于本地费用估算。 |
 | 刷新频率 | 提供秒级与分钟级选项；静止 60 秒后，刷新间隔延长至至少 5 分钟，新会话记录通过文件事件唤醒。 |
 | 请求详情 | 补充响应消息解析、内容加载状态与重试入口，改善提示词及输出的展示。 |
+| ZCode 接入 | 独立平台面板，按实际模型统计用量、速率和历史；支持为第三方模型设置自定义单价。 |
+
+### ZCode 与第三方模型
+
+ZCode 显示为独立平台，可在“设置 → 显示 ZCode”中切换。统计读取本机 ZCode 会话数据库与历史日志，涵盖在 ZCode 中接入的各类模型；速率区块沿用模型筛选，今日用量与周、月、年记录按 ZCode 来源汇总。模型价格设置中选择 ZCode 和实际模型 ID，即可为自建网关或第三方服务设置单价。
+
+| 项目 | 数据口径 |
+| --- | --- |
+| Token | 按实际模型与提供方读取请求用量，缓存输入与推理输出归入独立分项。 |
+| 响应速率 | 输出（含推理）Token ÷ 单次模型请求总耗时，包含首 Token 等待；工具执行时间独立。各模型采用同一口径。 |
+| 历史记录 | 数据库记录优先，旧版日志补齐较早历史，同一请求按时间与用量匹配去重。 |
+| 费用 | 按可用模型费率或自定义单价估算，价格缺失时显示待定。 |
+| 额度 | 当前 ZCode 接入覆盖本地用量；第三方服务的剩余额度需对应提供方接口。 |
+| 会话打开 | 点击最近会话打开 ZCode 应用，悬停可查看本地请求详情。 |
+
+<p align="center">
+  <img src="docs/images/plus-zcode.png" width="440" alt="ZCode 第三方模型示例：按 Gemini 与 GPT 模型区分响应速率，展示今日用量和历史记录">
+</p>
+
+默认数据位于 `~/.zcode/cli`；同时识别 `ZCODE_DATA_BASE_DIR` 与 `~/.zcode/v2/setting.json` 的 `dataBaseDir` 配置，它们表示包含 `.zcode` 的基目录。首次读取历史日志的耗时随日志体积变化，后续刷新复用本机元数据缓存。ZCode 数据格式的依据为已安装的 3.15.3 版本；模型用量与远端套餐的区别参见 [ZCode 官方使用统计说明](https://zcode.z.ai/cn/docs/usage-stats)。
 
 ### 最新迭代：2026-10-17
 
@@ -93,7 +113,7 @@ cd TokenBar-Plus
 
 常用快捷键：`⌘R` 刷新、`⌘,` 设置、`⌘Q` 退出。
 
-本项目沿用上游的 Codex、Claude Code、Grok Build、Antigravity 支持，以及仓库中的 Windows、同步服务代码。本分支的界面改进与运行验收主要覆盖 macOS，其他平台的安装与能力说明见 [上游文档](README.upstream.md)、[Windows 文档](Windows/README.md)。本项目独立维护，与相关平台厂商之间的关系为第三方工具。
+本项目沿用上游的 Codex、Claude Code、Grok Build、Antigravity 支持，新增 ZCode 本地用量接入，同时保留仓库中的 Windows、同步服务代码。本分支的界面改进与运行验收主要覆盖 macOS，其他平台的安装与能力说明见 [上游文档](README.upstream.md)、[Windows 文档](Windows/README.md)。本项目独立维护，与相关平台厂商之间的关系为第三方工具。
 
 ## 统计口径
 

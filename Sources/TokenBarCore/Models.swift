@@ -24,6 +24,7 @@ public struct TokenPlatform: RawRepresentable, Codable, Equatable, Hashable, Ide
         case .claude: "Claude"
         case .grok: "Grok"
         case .antigravity: "Antigravity"
+        case .zcode: "ZCode"
         default: self.rawValue.capitalized
         }
     }
@@ -34,6 +35,7 @@ public struct TokenPlatform: RawRepresentable, Codable, Equatable, Hashable, Ide
         case .claude: "A"
         case .grok: "G"
         case .antigravity: "AG"
+        case .zcode: "Z"
         default: String(self.displayName.prefix(1))
         }
     }
@@ -42,6 +44,7 @@ public struct TokenPlatform: RawRepresentable, Codable, Equatable, Hashable, Ide
     public static let claude = TokenPlatform(rawValue: "claude")
     public static let grok = TokenPlatform(rawValue: "grok")
     public static let antigravity = TokenPlatform(rawValue: "antigravity")
+    public static let zcode = TokenPlatform(rawValue: "zcode")
 }
 
 public enum DashboardScope: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
@@ -49,6 +52,7 @@ public enum DashboardScope: String, Codable, CaseIterable, Hashable, Identifiabl
     case claude
     case grok
     case antigravity
+    case zcode
 
     public var id: String { self.rawValue }
 
@@ -58,6 +62,7 @@ public enum DashboardScope: String, Codable, CaseIterable, Hashable, Identifiabl
         case .claude: TokenPlatform.claude.displayName
         case .grok: TokenPlatform.grok.displayName
         case .antigravity: TokenPlatform.antigravity.displayName
+        case .zcode: TokenPlatform.zcode.displayName
         }
     }
 
@@ -67,6 +72,7 @@ public enum DashboardScope: String, Codable, CaseIterable, Hashable, Identifiabl
         case .claude: .claude
         case .grok: .grok
         case .antigravity: .antigravity
+        case .zcode: .zcode
         }
     }
 
@@ -77,7 +83,8 @@ public enum DashboardScope: String, Codable, CaseIterable, Hashable, Identifiabl
     public static func visibleScopes(
         showsClaude: Bool,
         showsGrok: Bool,
-        showsAntigravity: Bool) -> [Self]
+        showsAntigravity: Bool,
+        showsZCode: Bool = false) -> [Self]
     {
         Self.allCases.filter { scope in
             switch scope {
@@ -85,6 +92,7 @@ public enum DashboardScope: String, Codable, CaseIterable, Hashable, Identifiabl
             case .claude: showsClaude
             case .grok: showsGrok
             case .antigravity: showsAntigravity
+            case .zcode: showsZCode
             }
         }
     }

@@ -153,7 +153,7 @@ struct ModelPricingSettingsView: View {
 
             HStack(spacing: 16) {
                 Picker("平台", selection: self.draftBinding(\.platform)) {
-                    ForEach([TokenPlatform.codex, .claude, .grok, .antigravity]) { platform in
+                    ForEach([TokenPlatform.codex, .claude, .grok, .antigravity, .zcode]) { platform in
                         Text(platform.displayName).tag(platform)
                     }
                 }
@@ -246,7 +246,7 @@ struct ModelPricingSettingsView: View {
     }
 
     private var availableObservedModels: [ObservedPricingModel] {
-        let platforms: Set<TokenPlatform> = [.codex, .claude, .grok, .antigravity]
+        let platforms: Set<TokenPlatform> = [.codex, .claude, .grok, .antigravity, .zcode]
         var seen: Set<String> = []
         return self.observedModels.filter {
             platforms.contains($0.platform) && seen.insert($0.id).inserted

@@ -240,13 +240,13 @@ public struct ActivityService: ActivityProviding, Sendable {
 
         let unpricedPlatforms = Self.unpricedCatalogPlatforms(in: initial)
         guard !unpricedPlatforms.isEmpty else { return initial }
-        async let refreshedOpenAIPricingURL: URL? = unpricedPlatforms.contains(.codex)
+        async let refreshedOpenAIPricingURL: URL? = (unpricedPlatforms.contains(.codex) || unpricedPlatforms.contains(.zcode))
             ? self.openAIPricingCatalog?.refreshNowIfAllowed()
             : nil
-        async let refreshedAnthropicPricingURL: URL? = unpricedPlatforms.contains(.claude)
+        async let refreshedAnthropicPricingURL: URL? = (unpricedPlatforms.contains(.claude) || unpricedPlatforms.contains(.zcode))
             ? self.anthropicPricingCatalog?.refreshNowIfAllowed()
             : nil
-        async let refreshedGooglePricingURL: URL? = unpricedPlatforms.contains(.antigravity)
+        async let refreshedGooglePricingURL: URL? = (unpricedPlatforms.contains(.antigravity) || unpricedPlatforms.contains(.zcode))
             ? self.openRouterPricingCatalog?.refreshNowIfAllowed()
             : nil
         let refreshedURLs = await (
@@ -312,7 +312,7 @@ public struct ActivityService: ActivityProviding, Sendable {
                     where physical.costSource == .unknown && physical.tokens.total > 0
                 {
                     let platform = physical.platform ?? session.platform ?? .codex
-                    if platform == .codex || platform == .claude || platform == .antigravity {
+                    if platform == .codex || platform == .claude || platform == .antigravity || platform == .zcode {
                         platforms.insert(platform)
                     }
                 }

@@ -82,6 +82,7 @@ struct TokenBarSettingsView: View {
                 Toggle("显示 Claude Code", isOn: self.$settings.showsClaude)
                 Toggle("显示 Grok Build", isOn: self.$settings.showsGrok)
                 Toggle("显示 Antigravity", isOn: self.$settings.showsAntigravity)
+                Toggle("显示 ZCode", isOn: self.$settings.showsZCode)
 
                 Text("显示各平台的今日／每周区域及仪表盘标签页。更改立即生效。")
                     .font(.caption)

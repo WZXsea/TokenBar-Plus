@@ -9,6 +9,7 @@ struct DashboardSummaryView: View {
     let showsClaude: Bool
     let showsGrok: Bool
     let showsAntigravity: Bool
+    var showsZCode: Bool = false
     let usesWeekdayWeeklyPacing: Bool
     let accentColor: Color
     var sections: [TokenBarDashboardSection] = DashboardSummaryView.defaultSections
@@ -19,17 +20,20 @@ struct DashboardSummaryView: View {
         showsClaude: Bool,
         showsGrok: Bool,
         showsAntigravity: Bool,
+        showsZCode: Bool = false,
         sections: [TokenBarDashboardSection] = DashboardSummaryView.defaultSections) -> CGFloat
     {
         DashboardLayout.headerHeight(
             showsClaude: showsClaude,
             showsGrok: showsGrok,
-            showsAntigravity: showsAntigravity)
+            showsAntigravity: showsAntigravity,
+            showsZCode: showsZCode)
             + self.summarySections(sections, providesQuota: providesQuota).reduce(0) { total, section in
                 total + (section == .activity
                     ? ActivitySummarySection.preferredHeight + 1
                     : DashboardSectionContentView.preferredHeight(
-                        for: section, quota: quota, showsWeeklyUsage: sections.contains(.quota) && sections.contains(.weeklyReset)))
+                        for: section, quota: quota, showsWeeklyUsage: sections.contains(.quota) && sections.contains(.weeklyReset),
+                        providesQuota: providesQuota))
             }
     }
 
@@ -40,12 +44,14 @@ struct DashboardSummaryView: View {
                 showsClaude: self.showsClaude,
                 showsGrok: self.showsGrok,
                 showsAntigravity: self.showsAntigravity,
+                showsZCode: self.showsZCode,
                 accentColor: self.accentColor,
                 onSelectScope: nil)
                 .frame(height: DashboardLayout.headerHeight(
                     showsClaude: self.showsClaude,
                     showsGrok: self.showsGrok,
-                    showsAntigravity: self.showsAntigravity))
+                    showsAntigravity: self.showsAntigravity,
+                    showsZCode: self.showsZCode))
             ForEach(Self.summarySections(
                 self.sections,
                 providesQuota: self.model.providesQuota(for: self.model.scope.platform)), id: \.self)
@@ -102,7 +108,8 @@ struct DashboardSectionContentView: View {
         for section: TokenBarDashboardSection,
         quota: QuotaSnapshot?,
         showsResetCredits: Bool = true,
-        showsWeeklyUsage: Bool = false) -> CGFloat
+        showsWeeklyUsage: Bool = false,
+        providesQuota: Bool = true) -> CGFloat
     {
         switch section {
         case .speed: SpeedSummarySection.preferredHeight + 1
@@ -110,7 +117,7 @@ struct DashboardSectionContentView: View {
             DashboardLayout.quotaHeight(quota: quota) + 1
                 + (showsWeeklyUsage ? 40 : 0)
                 - (!showsResetCredits && quota?.resetCredits != nil ? DashboardLayout.resetCreditsIncrement : 0)
-        case .today: DashboardLayout.todayHeight + 1
+        case .today: DashboardLayout.todayHeight + 1 - (providesQuota ? 0 : DashboardLayout.todayQuotaUsageHeight)
         case .weeklyReset: DashboardLayout.weeklyResetActivityHeight + 1
         case .activity, .memory, .recentSessions: 0
         }
@@ -123,7 +130,8 @@ struct DashboardSectionContentView: View {
             let quota = self.model.quotaState(for: self.model.scope.platform).value
             let height = Self.preferredHeight(
                 for: self.section, quota: quota, showsResetCredits: self.showsResetCredits,
-                showsWeeklyUsage: self.showsWeeklyUsage)
+                showsWeeklyUsage: self.showsWeeklyUsage,
+                providesQuota: self.model.providesQuota(for: self.model.scope.platform))
             VStack(spacing: 0) {
                 Divider().padding(.horizontal, 12).frame(height: 1)
                 self.sectionContent
@@ -160,6 +168,7 @@ struct DashboardSectionContentView: View {
                 state: self.model.visibleActivity,
                 weeklyQuotaUsage: self.model.weeklyQuotaUsageToday(for: platform),
                 dayBreakdown: self.model.weeklyQuotaDayBreakdown(for: platform),
+                showsQuotaUsage: self.model.providesQuota(for: platform),
                 usesWeekdayWeeklyPacing: self.usesWeekdayWeeklyPacing,
                 accentColor: self.accentColor)
         case .weeklyReset:
@@ -196,7 +205,7 @@ struct SpeedSummarySection: View {
         let presentation = selection.summary
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline) {
-                Text("生成速度").font(.system(size: 12, weight: .semibold))
+                Text(SpeedSummaryPresentation.title(for: self.platform)).font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Text("最近一轮").font(.system(size: 10)).foregroundStyle(.secondary)
             }
@@ -233,7 +242,7 @@ struct SpeedSummarySection: View {
         .onChange(of: selection.models) { _, models in
             if let selectedModel = self.selectedModel, !models.contains(selectedModel) { self.selectedModel = nil }
         }
-        .help("速率统计输出与推理 token，按实际请求耗时加权。曲线按模型分别绘制；悬停查看原始样本。")
+        .help(SpeedSummaryPresentation.helpText(for: self.platform))
     }
 
     private func modelButton(_ model: String?, label: String) -> some View {
@@ -271,17 +280,20 @@ enum DashboardLayout {
     private static let fiveHourQuotaIncrement: CGFloat = 54
     static let resetCreditsIncrement: CGFloat = 24
     static let todayHeight: CGFloat = 112
+    static let todayQuotaUsageHeight: CGFloat = 18
     static let weeklyResetActivityHeight: CGFloat = 64
 
     static func headerHeight(
         showsClaude: Bool,
         showsGrok: Bool,
-        showsAntigravity: Bool) -> CGFloat
+        showsAntigravity: Bool,
+        showsZCode: Bool = false) -> CGFloat
     {
         DashboardScope.visibleScopes(
             showsClaude: showsClaude,
             showsGrok: showsGrok,
-            showsAntigravity: showsAntigravity).count > 1
+            showsAntigravity: showsAntigravity,
+            showsZCode: showsZCode).count > 1
             ? self.headerHeight
             : self.compactHeaderHeight
     }
@@ -309,6 +321,7 @@ struct DashboardHeaderView: View {
     let showsClaude: Bool
     let showsGrok: Bool
     let showsAntigravity: Bool
+    var showsZCode: Bool = false
     let accentColor: Color
     let onSelectScope: ((DashboardScope) -> Void)?
 
@@ -316,7 +329,8 @@ struct DashboardHeaderView: View {
         let scopes = DashboardScope.visibleScopes(
             showsClaude: self.showsClaude,
             showsGrok: self.showsGrok,
-            showsAntigravity: self.showsAntigravity)
+            showsAntigravity: self.showsAntigravity,
+            showsZCode: self.showsZCode)
         VStack(spacing: 6) {
             HStack(spacing: 8) {
                 Text("TokenBar")
@@ -1087,6 +1101,7 @@ private struct TodaySummarySection: View {
     let state: DashboardSourceState<ActivitySnapshot>
     let weeklyQuotaUsage: WeeklyQuotaDailyUsage?
     var dayBreakdown: WeeklyQuotaDayBreakdown?
+    var showsQuotaUsage = true
     let usesWeekdayWeeklyPacing: Bool
     let accentColor: Color
 
@@ -1108,18 +1123,20 @@ private struct TodaySummarySection: View {
                         .foregroundStyle(TokenBarVisualStyle.costAccentColor)
                 }
 
-                HStack(spacing: 4) {
-                    Text(self.weeklyQuotaUsage == nil && self.dayBreakdown?.wasAdjustedForQuotaCorrection == true ? "今日估算周额度" : "今日已用周额度")
-                        .foregroundStyle(.secondary)
-                    Text(QuotaDayText.value(self.weeklyQuotaUsage?.usedPercentagePoints ?? self.dayBreakdown?.todayUsedPercentagePoints,
-                        partial: self.weeklyQuotaUsage?.isPartial ?? self.dayBreakdown?.todayIsPartial ?? false,
-                        adjusted: self.weeklyQuotaUsage == nil && self.dayBreakdown?.wasAdjustedForQuotaCorrection == true,
-                        unknown: "待记录"))
-                        .fontWeight(.medium).foregroundStyle(self.accentColor).monospacedDigit()
-                    Spacer()
+                if self.showsQuotaUsage {
+                    HStack(spacing: 4) {
+                        Text(self.weeklyQuotaUsage == nil && self.dayBreakdown?.wasAdjustedForQuotaCorrection == true ? "今日估算周额度" : "今日已用周额度")
+                            .foregroundStyle(.secondary)
+                        Text(QuotaDayText.value(self.weeklyQuotaUsage?.usedPercentagePoints ?? self.dayBreakdown?.todayUsedPercentagePoints,
+                            partial: self.weeklyQuotaUsage?.isPartial ?? self.dayBreakdown?.todayIsPartial ?? false,
+                            adjusted: self.weeklyQuotaUsage == nil && self.dayBreakdown?.wasAdjustedForQuotaCorrection == true,
+                            unknown: "待记录"))
+                            .fontWeight(.medium).foregroundStyle(self.accentColor).monospacedDigit()
+                        Spacer()
+                    }
+                    .font(.system(size: 10))
+                    .help("占完整周额度的比例，按统计日累计已记录增量，包含当日重置前的用量；额度条按当前周期分色。≥ 表示当天部分记录；≈ 表示校正估算。")
                 }
-                .font(.system(size: 10))
-                .help("占完整周额度的比例，按统计日累计已记录增量，包含当日重置前的用量；额度条按当前周期分色。≥ 表示当天部分记录；≈ 表示校正估算。")
 
                 TokenStackedBar(tokens: totals.tokens, accentColor: self.accentColor)
 
@@ -1143,7 +1160,7 @@ private struct TodaySummarySection: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
-        .help(self.weeklyQuotaUsage?.menuHelpText ?? "今日使用量")
+        .help(self.showsQuotaUsage ? self.weeklyQuotaUsage?.menuHelpText ?? "今日使用量" : "今日使用量")
     }
 }
 

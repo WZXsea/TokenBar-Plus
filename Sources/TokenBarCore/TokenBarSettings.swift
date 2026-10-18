@@ -164,6 +164,7 @@ public final class TokenBarSettings {
     public static let defaultShowsClaude = true
     public static let defaultShowsGrok = true
     public static let defaultShowsAntigravity = true
+    public static let defaultShowsZCode = true
     public static let defaultUsesWeekdayWeeklyPacing = false
     public static let defaultShowsFullRequestContentOnHover = true
     public static let defaultMonitorsCodexMemory = true
@@ -236,6 +237,10 @@ public final class TokenBarSettings {
                 self.showsAntigravity,
                 forKey: self.keys.showsAntigravity)
         }
+    }
+
+    public var showsZCode: Bool {
+        didSet { self.defaults.set(self.showsZCode, forKey: self.keys.showsZCode) }
     }
 
     public var usesWeekdayWeeklyPacing: Bool {
@@ -342,6 +347,8 @@ public final class TokenBarSettings {
         self.showsAntigravity = defaults.object(
             forKey: self.keys.showsAntigravity) as? Bool
             ?? Self.defaultShowsAntigravity
+        self.showsZCode = defaults.object(forKey: self.keys.showsZCode) as? Bool
+            ?? Self.defaultShowsZCode
         self.usesWeekdayWeeklyPacing = defaults.object(
             forKey: self.keys.usesWeekdayWeeklyPacing) as? Bool
             ?? Self.defaultUsesWeekdayWeeklyPacing
@@ -422,6 +429,7 @@ public final class TokenBarSettings {
         self.showsClaude = Self.defaultShowsClaude
         self.showsGrok = Self.defaultShowsGrok
         self.showsAntigravity = Self.defaultShowsAntigravity
+        self.showsZCode = Self.defaultShowsZCode
         self.usesWeekdayWeeklyPacing = Self.defaultUsesWeekdayWeeklyPacing
         self.showsFullRequestContentOnHover = Self.defaultShowsFullRequestContentOnHover
         self.monitorsCodexMemory = Self.defaultMonitorsCodexMemory
@@ -450,6 +458,7 @@ public final class TokenBarSettings {
         let showsClaude: String
         let showsGrok: String
         let showsAntigravity: String
+        let showsZCode: String
         let usesWeekdayWeeklyPacing: String
         let showsFullRequestContentOnHover: String
         let monitorsCodexMemory: String
@@ -472,6 +481,7 @@ public final class TokenBarSettings {
             self.showsClaude = "\(prefix).showsClaude"
             self.showsGrok = "\(prefix).showsGrok"
             self.showsAntigravity = "\(prefix).showsAntigravity"
+            self.showsZCode = "\(prefix).showsZCode"
             self.usesWeekdayWeeklyPacing = "\(prefix).usesWeekdayWeeklyPacing"
             self.showsFullRequestContentOnHover = "\(prefix).showsFullRequestContentOnHover"
             self.monitorsCodexMemory = "\(prefix).monitorsCodexMemory"

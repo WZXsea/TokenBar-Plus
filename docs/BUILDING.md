@@ -70,7 +70,7 @@ swift test --build-system native \
 cargo test --manifest-path Helper/Cargo.toml --locked
 ```
 
-2026-10-17 精简测试集：Swift 23 项、Rust 14 项。保留额度与套餐解析、缓存兼容、重置与每日用量、实时速率边界、自定义计费、历史聚合，以及菜单栏颜色和会话徽标的关键回归；合并重复用例，清理大规模布局排列与辅助测试。完整历史测试集可从提交 `05db64c` 恢复。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
+2026-10-18 精简测试集：Swift 27 项、Rust 19 项（含 ZCode 接入回归）。保留额度与套餐解析、缓存兼容、重置与每日用量、实时速率边界、自定义计费、历史聚合，以及菜单栏颜色和会话徽标的关键回归；合并重复用例，清理大规模布局排列与辅助测试。完整历史测试集可从提交 `05db64c` 恢复。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
 
 ## 文档配图
 
@@ -84,6 +84,8 @@ TOKENBAR_DEMO_DASHBOARD_SECTIONS=speed,quota,today,activity \
 TOKENBAR_RENDER_PREVIEW=/tmp/tokenbar-dashboard.png \
 .build/debug/TokenBar
 ```
+
+ZCode 配图额外设置 `TOKENBAR_DEMO_SCOPE=zcode TOKENBAR_DEMO_MULTI_MODEL=1`，在内存中转换合成数据来展示两类第三方模型。
 
 生成的数据与账户、真实提示词和真实会话分离。演示值用于说明布局与交互，具体费率以设置中的规则及实际价格来源为准。
 

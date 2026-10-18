@@ -152,13 +152,29 @@ struct ActivityFilePaths: Sendable {
             return homeDirectory.appendingPathComponent(fallback, isDirectory: true)
         }
         let codex = root("CODEX_HOME", fallback: ".codex")
-        self.directories = [
+        var directories = [
             codex.appendingPathComponent("sessions"),
             codex.appendingPathComponent("archived_sessions"),
             root("CLAUDE_CONFIG_DIR", fallback: ".claude").appendingPathComponent("projects"),
             root("GROK_HOME", fallback: ".grok").appendingPathComponent("sessions"),
             root("ANTIGRAVITY_HOME", fallback: ".gemini/antigravity").appendingPathComponent("conversations"),
-        ].map { $0.standardizedFileURL.resolvingSymlinksInPath().path }
+        ]
+        // ZCode's override is a home-level base; each base contains .zcode/cli.
+        // Its legacy setting lives in the default home's .zcode/v2/setting.json.
+        var zcodeBases = [homeDirectory]
+        if let value = environment["ZCODE_DATA_BASE_DIR"], !value.isEmpty {
+            zcodeBases.append(URL(fileURLWithPath: value, isDirectory: true))
+        } else if let data = try? Data(contentsOf: homeDirectory.appendingPathComponent(".zcode/v2/setting.json")),
+                  let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let value = settings["dataBaseDir"] as? String, !value.isEmpty
+        {
+            zcodeBases.append(URL(fileURLWithPath: value, isDirectory: true))
+        }
+        for base in zcodeBases {
+            let cli = base.appendingPathComponent(".zcode/cli", isDirectory: true)
+            directories += [cli.appendingPathComponent("db"), cli.appendingPathComponent("rollout"), cli.appendingPathComponent("debug")]
+        }
+        self.directories = directories.map { $0.standardizedFileURL.resolvingSymlinksInPath().path }
     }
 
     func matches(_ path: String) -> Bool {
@@ -168,9 +184,14 @@ struct ActivityFilePaths: Sendable {
             switch index {
             case 0, 1, 2: return relative.hasSuffix(".jsonl")
             case 3: return URL(fileURLWithPath: relative).lastPathComponent == "updates.jsonl"
-            default:
+            case 4:
                 // SQLite readers touch SHM; DB/WAL mutations carry conversation writes.
                 return !relative.contains("/") && (relative.hasSuffix(".db") || relative.hasSuffix(".db-wal"))
+            default:
+                if directory.hasSuffix("/db") {
+                    return relative == "db.sqlite" || relative == "db.sqlite-wal"
+                }
+                return relative.hasSuffix(".jsonl")
             }
         }
         return false
