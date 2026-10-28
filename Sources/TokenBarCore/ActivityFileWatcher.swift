@@ -22,7 +22,7 @@ public final class ActivityFileWatcher: @unchecked Sendable {
     public init(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-        debounceInterval: TimeInterval = 0.5,
+        debounceInterval: TimeInterval = 0.1,
         onActivity: @escaping @Sendable () -> Void)
     {
         self.paths = ActivityFilePaths(environment: environment, homeDirectory: homeDirectory)
@@ -97,7 +97,7 @@ public final class ActivityFileWatcher: @unchecked Sendable {
         }
         guard let stream = FSEventStreamCreate(
             kCFAllocatorDefault, callback, &context, Array(roots) as CFArray,
-            FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.5,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.1,
             FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagFileEvents))
         else { return }
         FSEventStreamSetDispatchQueue(stream, self.queue)

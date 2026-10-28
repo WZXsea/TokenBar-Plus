@@ -8,6 +8,11 @@ public struct SpeedModelPresentation: Equatable, Sendable {
     public let summary: SpeedSummaryPresentation
     public let sampleTokensPerSecond: Double?
 
+    public var latestModelSamples: [SpeedTrendPoint] {
+        var seen: Set<String> = []
+        return self.points.reversed().filter { seen.insert($0.model).inserted }
+    }
+
     public init(snapshot: ActivitySnapshot?, platform: TokenPlatform, model: String? = nil, limit: Int = 30) {
         let observations = snapshot.map { Self.observations(snapshot: $0, platform: platform) } ?? []
         self.models = Array(Set(observations.map(\.model))).sorted()

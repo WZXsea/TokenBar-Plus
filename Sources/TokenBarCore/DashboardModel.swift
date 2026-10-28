@@ -71,6 +71,7 @@ public final class DashboardModel {
     @ObservationIgnored private var refreshAllTask: Task<Void, Never>?
     @ObservationIgnored private var activityRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var activityRefreshGeneration = 0
+    @ObservationIgnored private var activityRefreshNeedsFollowUp = false
     @ObservationIgnored private var lastQuotaRefreshAttemptAt: [TokenPlatform: Date] = [:]
     @ObservationIgnored private var quotaRefreshEnabledPlatforms: Set<TokenPlatform>
     @ObservationIgnored private var quotaResetDetector = QuotaResetDetector()
@@ -184,17 +185,23 @@ public final class DashboardModel {
         self.activityRefreshGeneration += 1
         self.activityRefreshTask?.cancel()
         self.activityRefreshTask = nil
+        self.activityRefreshNeedsFollowUp = false
     }
 
-    /// Called for changes in provider source files, after the watcher filters out
-    /// TokenBar's own caches. Active bursts coalesce into the normal polling loop.
+    /// Source writes refresh local usage immediately. Writes arriving during a
+    /// scan coalesce into one follow-up so the latest append is not left waiting.
     public func notifyActivityChanged() {
         guard self.isStarted else { return }
         let now = self.now()
         let wasIdle = self.activityRefreshPolicy.isIdle(at: now)
         self.activityRefreshPolicy.recordSourceChange(at: now)
         if wasIdle {
-            self.startRefreshTimers(refreshImmediately: true)
+            self.startRefreshTimers()
+        }
+        self.activityRefreshNeedsFollowUp = true
+        Task { @MainActor [weak self] in
+            guard let self, self.isStarted else { return }
+            await self.refreshActivity()
         }
     }
 
@@ -256,8 +263,10 @@ public final class DashboardModel {
 
         let refreshAllTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.refreshQuotas(force: forceQuota)
+            // Remote quota latency must not postpone local token and speed data.
+            async let quotas: Void = self.refreshQuotas(force: forceQuota)
             await self.refreshActivity()
+            await quotas
         }
         self.refreshAllTask = refreshAllTask
         await refreshAllTask.value
@@ -734,11 +743,12 @@ public final class DashboardModel {
 
     private func performActivityRefresh(generation: Int) async {
         guard generation == self.activityRefreshGeneration else { return }
-        self.activity = DashboardSourceState(
-            value: self.activity.value,
-            isRefreshing: true,
-            errorMessage: nil)
-        while true {
+        while generation == self.activityRefreshGeneration {
+            self.activityRefreshNeedsFollowUp = false
+            self.activity = DashboardSourceState(
+                value: self.activity.value,
+                isRefreshing: true,
+                errorMessage: nil)
             let statisticsTimeZone = self.statisticsTimeZone
             do {
                 let snapshot = try await self.activityService.fetchActivity(
@@ -760,6 +770,8 @@ public final class DashboardModel {
                 }
                 self.activity = DashboardSourceState(value: snapshot)
                 try? await self.cache?.saveActivity(snapshot)
+                guard generation == self.activityRefreshGeneration else { return }
+                if self.activityRefreshNeedsFollowUp { continue }
                 return
             } catch is CancellationError {
                 guard generation == self.activityRefreshGeneration else { return }
@@ -773,6 +785,7 @@ public final class DashboardModel {
                 self.activity = DashboardSourceState(
                     value: self.activity.value,
                     errorMessage: error.localizedDescription)
+                if self.activityRefreshNeedsFollowUp { continue }
                 return
             }
         }
@@ -782,17 +795,22 @@ public final class DashboardModel {
         self.quotaTimerTask?.cancel()
         self.quotaTimerTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            if refreshImmediately, !Task.isCancelled, self.isStarted {
-                await self.refreshAll(forceQuota: false)
-            }
+            let clock = ContinuousClock()
+            var delay = refreshImmediately ? Duration.zero : self.effectiveBackgroundRefreshInterval
             while !Task.isCancelled {
                 do {
-                    try await self.sleep(self.effectiveBackgroundRefreshInterval)
+                    try await self.sleep(delay)
                 } catch {
                     return
                 }
                 guard !Task.isCancelled, self.isStarted else { return }
+                let started = clock.now
                 await self.refreshAll(forceQuota: false)
+                guard !Task.isCancelled, self.isStarted else { return }
+                // The chosen interval is start-to-start, with scans kept serial.
+                // A two-second scan at a one-second setting starts its next scan
+                // when ready instead of adding another full second of sleep.
+                delay = max(.zero, self.effectiveBackgroundRefreshInterval - started.duration(to: clock.now))
             }
         }
     }

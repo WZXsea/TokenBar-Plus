@@ -311,18 +311,29 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
                 metric: self.settings.statusBarTopMetric, snapshot: snapshot, quota: quota, platform: platform, speedActivity: activity)
             let bottom = StatusBarMetricPresentation(
                 metric: self.settings.statusBarBottomMetric, snapshot: snapshot, quota: quota, platform: platform, speedActivity: activity)
+            let modelSpeeds = SpeedModelPresentation(snapshot: snapshot, platform: platform, limit: 30)
             let points = self.settings.showsStatusBarSpeedChart
-                ? SpeedTrendPresentation(snapshot: snapshot, platform: platform, limit: 30).points
+                ? Array(modelSpeeds.points.suffix(30))
                 : nil
+            let chartScale = points.map { SpeedChartScale(points: $0) }
             if activity.isActive, let deadline = activity.activeUntil { activeDeadlines.append(deadline) }
             let speedTone = StatusSpeedTone(isActive: activity.isActive, tokensPerSecond: activity.tokensPerSecond)
             let unread = self.unreadTasks.count(for: platform)
             var details = [top.detailText, bottom.detailText].compactMap { $0 }
+            for sample in modelSpeeds.latestModelSamples {
+                let time = Date(timeIntervalSince1970: Double(sample.endedAtMs) / 1_000)
+                    .formatted(.dateTime.month(.twoDigits).day(.twoDigits).hour().minute().second())
+                details.append("\(sample.model)：\(SpeedSummaryPresentation.rateValueText(sample.tokensPerSecond)) tok/s · \(time)")
+            }
             if let points {
                 details.append("速率曲线：最近最多30轮·逐轮采样，当前 \(points.count) 个有效样本（tok/s）")
                 details.append(points.isEmpty
                     ? "等待速度样本"
                     : "按轮次顺序等距连接；统计输出与推理 token，按模型请求计时")
+                if let chartScale, !chartScale.overflowIndices.isEmpty {
+                    let peak = points.map(\.tokensPerSecond).max() ?? 0
+                    details.append("↑ \(chartScale.overflowIndices.count) 个样本超出常规显示范围，原始峰值 \(SpeedSummaryPresentation.rateValueText(peak)) tok/s")
+                }
             }
             if platform == .zcode, points != nil,
                !Self.isSpeedMetric(self.settings.statusBarTopMetric),
@@ -341,6 +352,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             return StatusBarPlatformContent(
                 scope: scope, top: top.compactText, bottom: bottom.compactText,
                 unreadCount: unread, trendRates: points?.map(\.tokensPerSecond),
+                trendMaximum: chartScale?.maximum,
                 speedTone: speedTone,
                 topIsSpeed: Self.isSpeedMetric(self.settings.statusBarTopMetric),
                 bottomIsSpeed: Self.isSpeedMetric(self.settings.statusBarBottomMetric))
@@ -1995,17 +2007,20 @@ struct StatusBarPlatformContent: Equatable, Sendable {
     let unreadCount: Int
     /// nil hides the chart; an empty array draws the explicit empty indicator.
     let trendRates: [Double]?
+    let trendMaximum: Double?
     let speedTone: StatusSpeedTone
     let topIsSpeed: Bool
     let bottomIsSpeed: Bool
 
     init(scope: DashboardScope, top: String?, bottom: String?, unreadCount: Int = 0, trendRates: [Double]? = nil,
+         trendMaximum: Double? = nil,
          speedTone: StatusSpeedTone = .idle, topIsSpeed: Bool = false, bottomIsSpeed: Bool = false) {
         self.scope = scope
         self.top = top
         self.bottom = bottom
         self.unreadCount = unreadCount
         self.trendRates = trendRates
+        self.trendMaximum = trendMaximum
         self.speedTone = speedTone
         self.topIsSpeed = topIsSpeed
         self.bottomIsSpeed = bottomIsSpeed
@@ -2013,13 +2028,14 @@ struct StatusBarPlatformContent: Equatable, Sendable {
 }
 
 enum StatusSpeedChartGeometry {
-    static func points(rates: [Double], in rect: NSRect) -> [NSPoint] {
+    static func points(rates: [Double], in rect: NSRect, maximum: Double? = nil) -> [NSPoint] {
         let values = Array(rates.filter { $0.isFinite && $0 > 0 }.suffix(30))
-        guard let peak = values.max() else { return [] }
+        guard !values.isEmpty else { return [] }
+        let peak = maximum ?? SpeedChartScale(rates: values).maximum
         return values.enumerated().map { index, rate in
             NSPoint(
                 x: values.count == 1 ? rect.midX : rect.minX + CGFloat(index) / CGFloat(values.count - 1) * rect.width,
-                y: rect.minY + CGFloat(rate / peak) * rect.height)
+                y: rect.minY + CGFloat(min(1, rate / peak)) * rect.height)
         }
     }
 }
@@ -2066,6 +2082,7 @@ enum StatusLabelRenderer {
         let images = contents.map { content in
             self.image(platform: content.scope.platform, top: content.top, bottom: content.bottom,
                        unreadCount: content.unreadCount, trendRates: content.trendRates,
+                       trendMaximum: content.trendMaximum,
                        speedTone: content.speedTone, topIsSpeed: content.topIsSpeed, bottomIsSpeed: content.bottomIsSpeed)
         }
         let gap: CGFloat = 7
@@ -2147,7 +2164,7 @@ enum StatusLabelRenderer {
 
     static func image(
         platform: TokenPlatform? = nil, top: String?, bottom: String?, unreadCount: Int = 0,
-        trendRates: [Double]? = nil, speedTone: StatusSpeedTone = .idle,
+        trendRates: [Double]? = nil, trendMaximum: Double? = nil, speedTone: StatusSpeedTone = .idle,
         topIsSpeed: Bool = false, bottomIsSpeed: Bool = false) -> NSImage
     {
         let geometry = self.geometry(platform: platform, top: top, bottom: bottom, showsTrend: trendRates != nil)
@@ -2174,7 +2191,7 @@ enum StatusLabelRenderer {
                 }
             }
             if let rates = trendRates, let rect = geometry.chartRect {
-                self.drawTrend(rates: rates, in: rect, color: speedTone.color)
+                self.drawTrend(rates: rates, in: rect, color: speedTone.color, maximum: trendMaximum)
             }
             if let top, let rect = geometry.topRect {
                 var textAttributes = attributes
@@ -2204,8 +2221,10 @@ enum StatusLabelRenderer {
         value.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
     }
 
-    private static func drawTrend(rates: [Double], in rect: NSRect, color: NSColor) {
-        let points = StatusSpeedChartGeometry.points(rates: rates, in: rect.insetBy(dx: 1.5, dy: 1.5))
+    private static func drawTrend(rates: [Double], in rect: NSRect, color: NSColor, maximum: Double?) {
+        let values = Array(rates.filter { $0.isFinite && $0 > 0 }.suffix(30))
+        let maximum = maximum ?? SpeedChartScale(rates: values).maximum
+        let points = StatusSpeedChartGeometry.points(rates: values, in: rect.insetBy(dx: 1.5, dy: 1.5), maximum: maximum)
         guard let first = points.first else {
             let dash = "—" as NSString
             let attributes: [NSAttributedString.Key: Any] = [
@@ -2229,6 +2248,15 @@ enum StatusLabelRenderer {
         let diameter: CGFloat = points.count == 1 ? 2.6 : 2.2
         NSBezierPath(ovalIn: NSRect(x: last.x - diameter / 2, y: last.y - diameter / 2,
                                   width: diameter, height: diameter)).fill()
+        for index in values.indices where values[index] > maximum {
+            let point = points[index]
+            let marker = NSBezierPath()
+            marker.move(to: NSPoint(x: point.x - 1.8, y: point.y - 1.5))
+            marker.line(to: NSPoint(x: point.x, y: point.y + 1))
+            marker.line(to: NSPoint(x: point.x + 1.8, y: point.y - 1.5))
+            marker.lineWidth = 0.8
+            marker.stroke()
+        }
     }
 }
 

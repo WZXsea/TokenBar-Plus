@@ -17,7 +17,8 @@ struct SpeedTrendChartView: View {
     var body: some View {
         GeometryReader { geometry in
             let rect = CGRect(x: 31, y: 4, width: max(1, geometry.size.width - 35), height: 46)
-            let maximum = SpeedTrendChartGeometry.niceMaximum(self.points.map(\.tokensPerSecond).max() ?? 0)
+            let scale = SpeedChartScale(points: self.points)
+            let maximum = scale.maximum
             let locations = self.locations(in: rect, maximum: maximum)
             ZStack(alignment: .topLeading) {
                 self.axes(in: rect, maximum: maximum)
@@ -37,8 +38,14 @@ struct SpeedTrendChartView: View {
                                              startPoint: .top, endPoint: .bottom))
                         curve.stroke(color, style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
                     }
-                    if let index = self.hoveredIndex.flatMap({ indices.contains($0) ? $0 : nil }) ?? indices.last {
+                    if let index = self.hoveredIndex.flatMap({ indices.contains($0) ? $0 : nil }) ?? indices.last,
+                       !scale.overflowIndices.contains(index) {
                         Circle().fill(color).frame(width: 4, height: 4).position(locations[index])
+                    }
+                    ForEach(indices.filter { scale.overflowIndices.contains($0) }, id: \.self) { index in
+                        Image(systemName: "arrowtriangle.up.fill")
+                            .font(.system(size: 6, weight: .bold)).foregroundStyle(color)
+                            .position(locations[index])
                     }
                 }
                 if self.points.isEmpty {
@@ -51,11 +58,15 @@ struct SpeedTrendChartView: View {
             .overlay(alignment: .topTrailing) {
                 if let index = self.hoveredIndex, self.points.indices.contains(index) {
                     let point = self.points[index]
-                    Text("\(point.model.isEmpty ? "" : point.model + " · ")\(Self.rateText(point.tokensPerSecond)) tok/s · \(Self.sampleTimeText(point))")
+                    Text("\(scale.overflowIndices.contains(index) ? "↑ " : "")\(point.model.isEmpty ? "" : point.model + " · ")\(Self.rateText(point.tokensPerSecond)) tok/s · \(Self.sampleTimeText(point))")
                         .font(.system(size: 9)).monospacedDigit().foregroundStyle(.primary)
                         .lineLimit(1).minimumScaleFactor(0.7)
                         .padding(.horizontal, 4).padding(.vertical, 2)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 3))
+                        .allowsHitTesting(false)
+                } else if !scale.overflowIndices.isEmpty {
+                    Text("↑ \(scale.overflowIndices.count) 个超界样本")
+                        .font(.system(size: 8)).foregroundStyle(.secondary)
                         .allowsHitTesting(false)
                 }
             }
@@ -74,7 +85,7 @@ struct SpeedTrendChartView: View {
         .frame(height: Self.preferredHeight)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(self.accessibilityText)
-        .help("\(self.accessibilityText)悬停查看模型、实测速率与时间。")
+        .help("\(self.accessibilityText)悬停查看模型、实测速率与时间。↑ 表示超出常规显示范围，提示保留原始速率。")
     }
 
     private var models: [String] { Array(Set(self.points.map(\.model))).sorted() }
@@ -128,6 +139,7 @@ struct SpeedTrendChartView: View {
         guard let point = self.points.last else { return "生成速率趋势，等待有效速率样本" }
         return "生成速率趋势，\(self.models.count) 类模型，\(self.points.count) 个样本，横轴为样本结束时间，纵轴为 tok/s。"
             + "最新 \(Self.rateText(point.tokensPerSecond)) tok/s，样本时间 \(Self.sampleTimeText(point))。曲线以单调插值连接实测值。"
+            + "\(SpeedChartScale(points: self.points).overflowIndices.count) 个样本超出常规显示范围，原始数据保留。"
     }
 
     private func axisTimeText(_ milliseconds: Int64?) -> String {
@@ -155,14 +167,7 @@ struct SpeedTrendChartView: View {
 
 enum SpeedTrendChartGeometry {
     static func niceMaximum(_ peak: Double) -> Double {
-        guard peak.isFinite, peak > 0 else { return 1 }
-        let exponent = pow(10, floor(log10(peak)))
-        guard exponent.isFinite, exponent > 0 else { return peak }
-        for multiplier in [1.0, 2, 2.5, 5, 7.5, 10] {
-            let bound = exponent * multiplier
-            if bound.isFinite, bound >= peak { return bound }
-        }
-        return peak
+        SpeedChartScale.niceMaximum(peak)
     }
 
     /// Control points stay inside each pair's bounding rectangle, retaining every measured extremum.
@@ -198,8 +203,8 @@ enum SpeedTrendChartGeometry {
 
     /// Kept for the compact menu-bar plot and its zero-baseline geometry contract.
     static func normalizedPoints(rates: [Double]) -> [CGPoint] {
-        guard !rates.isEmpty, rates.allSatisfy({ $0.isFinite && $0 > 0 }),
-              let peak = rates.max(), peak > 0 else { return [] }
+        guard !rates.isEmpty, rates.allSatisfy({ $0.isFinite && $0 > 0 }) else { return [] }
+        let peak = SpeedChartScale(rates: rates).maximum
         return rates.enumerated().map { index, rate in
             CGPoint(x: rates.count == 1 ? 0.5 : Double(index) / Double(rates.count - 1),
                     y: max(0, min(1, 1 - rate / peak)))

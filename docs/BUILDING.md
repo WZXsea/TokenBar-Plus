@@ -52,6 +52,12 @@ SH
 
 这些路径对应本机验证环境；使用完整 Xcode 的环境优先采用标准构建命令。native 构建引擎在 Swift 6.4 中已标记为 deprecated，此处用于兼容上述 CLT 环境。
 
+## 本机安装与应用副本
+
+打包完成后运行 `bash Scripts/install_app.sh`。安装脚本保留 `/Applications/TokenBar.app` 的外层目录，替换完整 `Contents`，验证代码签名与可执行文件后，将构建副本和上一版本保存为 `.build/install/TokenBar-current.zip` 与 `TokenBar-previous.zip`。安装验证失败时恢复上一份应用内容，用户设置保留在原位置。
+
+完成安装后启动 `/Applications/TokenBar.app`。源码目录中的 `.app` 构建副本会移除，压缩归档可用于恢复和分发前检查。
+
 ## 测试
 
 完整 Xcode 环境可以使用 `swift test`。上述 CLT 环境通过以下参数加载其自带的 Swift Testing：
@@ -70,7 +76,7 @@ swift test --build-system native \
 cargo test --manifest-path Helper/Cargo.toml --locked
 ```
 
-2026-10-18 精简测试集：Swift 27 项、Rust 19 项（含 ZCode 接入回归）。保留额度与套餐解析、缓存兼容、重置与每日用量、实时速率边界、自定义计费、历史聚合，以及菜单栏颜色和会话徽标的关键回归；合并重复用例，清理大规模布局排列与辅助测试。完整历史测试集可从提交 `05db64c` 恢复。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
+2026-10-28 精简测试集：Swift 32 项、Rust 19 项（含 ZCode、事件追扫、并行模型和曲线显示范围回归）。保留额度与套餐解析、缓存兼容、重置与每日用量、实时速率边界、自定义计费、历史聚合，以及菜单栏颜色和会话徽标的关键回归；合并重复用例，清理大规模布局排列与辅助测试。完整历史测试集可从提交 `05db64c` 恢复。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
 
 ## 文档配图
 

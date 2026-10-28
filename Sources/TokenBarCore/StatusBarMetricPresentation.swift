@@ -26,12 +26,6 @@ public struct StatusBarMetricPresentation: Equatable, Sendable {
             self.detailText = nil
             return
         }
-        if metric == .latestSpeed, snapshot != nil,
-           let speedActivity, !speedActivity.isActive {
-            self.compactText = "0t/s"
-            self.detailText = "\(metricName)：0 tok/s（未活动）\(speedMethod)"
-            return
-        }
         let totals = Self.totals(snapshot: snapshot, platform: platform)
         var compact: String?
         var detail: String?
@@ -81,7 +75,9 @@ public struct StatusBarMetricPresentation: Equatable, Sendable {
         case .timeToFirstToken: "ms"
         case .none: ""
         }
-        self.detailText = "\(metricName)：\(detail ?? "待获取（\(missingUnit)）")\(speedMethod)"
+        let activityNote = metric == .latestSpeed && compact != nil && speedActivity?.isActive == false
+            ? "（上次记录，当前空闲）" : ""
+        self.detailText = "\(metricName)：\(detail ?? "待获取（\(missingUnit)）")\(activityNote)\(speedMethod)"
     }
 
     private static func totals(snapshot: ActivitySnapshot?, platform: TokenPlatform) -> ActivityTotals? {

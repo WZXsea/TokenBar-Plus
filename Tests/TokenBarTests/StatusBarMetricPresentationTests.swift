@@ -3,8 +3,8 @@ import Testing
 import TokenBarCore
 
 struct StatusBarMetricPresentationTests {
-    @Test("Live status speed becomes zero when idle while recorded averages and samples remain intact")
-    func idleSpeedBecomesZero() {
+    @Test("Idle status retains the last recorded speed and identifies it as a previous observation")
+    func idleSpeedRetainsLastObservation() {
         let snapshot = self.snapshot(rate: 50)
         let active = StatusBarSpeedActivity(snapshot: snapshot, platform: .codex,
                                             now: Date(timeIntervalSince1970: 6))
@@ -15,8 +15,8 @@ struct StatusBarMetricPresentationTests {
                                         platform: .codex, speedActivity: activity)
         }
         #expect(metric(.latestSpeed, activity: active).compactText == "100t/s")
-        #expect(metric(.latestSpeed, activity: idle).compactText == "0t/s")
-        #expect(metric(.latestSpeed, activity: idle).detailText?.contains("0 tok/s") == true)
+        #expect(metric(.latestSpeed, activity: idle).compactText == "100t/s")
+        #expect(metric(.latestSpeed, activity: idle).detailText?.contains("上次记录，当前空闲") == true)
         #expect(metric(.todayAverageSpeed, activity: idle).compactText == "50.0t/s")
         #expect(self.presentation(.latestSpeed, snapshot: snapshot).compactText == "100t/s")
         #expect(StatusBarMetricPresentation(metric: .latestSpeed, snapshot: nil, quota: nil,
