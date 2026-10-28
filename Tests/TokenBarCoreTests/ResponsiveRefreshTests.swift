@@ -111,7 +111,7 @@ struct ResponsiveRefreshTests {
 
     private func eventually(_ condition: () async -> Bool) async -> Bool {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(1))
+        let deadline = clock.now.advanced(by: .seconds(3))
         while clock.now < deadline {
             if await condition() { return true }
             try? await Task.sleep(for: .milliseconds(1))

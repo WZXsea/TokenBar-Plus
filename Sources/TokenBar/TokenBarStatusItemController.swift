@@ -58,6 +58,17 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     private var statusLabelLayout: StatusLabelLayout?
     private var statusBarContents: [StatusBarPlatformContent] = []
     private var statusSpeedExpiryTask: Task<Void, Never>?
+    private struct StatusCarouselContext {
+        let activity: StatusBarSpeedActivity
+        let details: [String]
+        let name: String
+        let unread: Int
+    }
+    private var statusCarouselContexts: [TokenPlatform: StatusCarouselContext] = [:]
+    private lazy var statusSpeedCarousel = StatusSpeedCarouselDriver(
+        onSelectionChange: { [weak self] in self?.statusModelSelectionDidChange() },
+        onAnimationFrame: { [weak self] in self?.renderStatusButton(transitions: $0) },
+        platformForScroll: { [weak self] in self?.platformForSpeedScroll($0) })
     private var nextMenuScopeOverride: DashboardScope?
     private var sessionItems: [NSMenuItem] = []
     private var renderedSessionProjection: RenderedSessionProjection?
@@ -172,6 +183,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     func tearDown() {
+        self.statusSpeedCarousel.stop()
         self.statusSpeedExpiryTask?.cancel()
         self.statusSpeedExpiryTask = nil
         self.activityFileWatcher?.stop()
@@ -220,6 +232,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     func menuWillOpen(_ menu: NSMenu) {
         if menu === self.rootMenu {
             self.isRootMenuOpen = true
+            self.statusSpeedCarousel.menuIsOpen = true
             self.installShortcutMonitor()
             self.unreadTasks.refresh()
             Task { @MainActor [weak self] in
@@ -245,6 +258,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         self.highlightedRows.removeValue(forKey: menuID)?.setMenuHighlighted(false)
         if menu === self.rootMenu {
             self.isRootMenuOpen = false
+            self.statusSpeedCarousel.menuIsOpen = false
             self.removeShortcutMonitor()
         }
     }
@@ -282,6 +296,7 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
         guard let button = self.statusItem.button else { return }
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleNone
+        self.statusSpeedCarousel.attach(to: button)
         self.updateStatusButton()
     }
 
@@ -298,8 +313,8 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
     }
 
     private func updateStatusButton() {
-        guard let button = self.statusItem.button else { return }
-        var toolTips: [String] = []
+        guard self.statusItem.button != nil else { return }
+        self.statusCarouselContexts = [:]
         let now = Date()
         var activeDeadlines: [Date] = []
         let contents = self.visibleScopes.map { scope in
@@ -312,14 +327,26 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             let bottom = StatusBarMetricPresentation(
                 metric: self.settings.statusBarBottomMetric, snapshot: snapshot, quota: quota, platform: platform, speedActivity: activity)
             let modelSpeeds = SpeedModelPresentation(snapshot: snapshot, platform: platform, limit: 30)
+            self.statusSpeedCarousel.updateSamples(modelSpeeds.latestModelSamples, for: platform)
+            let selectedSample = self.statusSpeedCarousel.currentSample(for: platform)
+            let rotatesTop = self.settings.statusBarTopMetric == .latestSpeed
+            let rotatesBottom = self.settings.statusBarBottomMetric == .latestSpeed
+            let hasCarousel = rotatesTop || rotatesBottom
+            let selectedText = selectedSample.map { SpeedSummaryPresentation.rateValueText($0.tokensPerSecond) + "t/s" }
             let points = self.settings.showsStatusBarSpeedChart
                 ? Array(modelSpeeds.points.suffix(30))
                 : nil
             let chartScale = points.map { SpeedChartScale(points: $0) }
             if activity.isActive, let deadline = activity.activeUntil { activeDeadlines.append(deadline) }
             let speedTone = StatusSpeedTone(isActive: activity.isActive, tokensPerSecond: activity.tokensPerSecond)
+            let selectedTone = StatusSpeedTone(isActive: activity.isActive, tokensPerSecond: selectedSample?.tokensPerSecond)
             let unread = self.unreadTasks.count(for: platform)
-            var details = [top.detailText, bottom.detailText].compactMap { $0 }
+            var details = [rotatesTop && selectedSample != nil ? nil : top.detailText,
+                           rotatesBottom && selectedSample != nil ? nil : bottom.detailText].compactMap { $0 }
+            if hasCarousel, platform == .zcode { details.append(SpeedSummaryPresentation.helpText(for: platform)) }
+            if hasCarousel, self.statusSpeedCarousel.samples(for: platform).count > 1 {
+                details.append("数字停留3秒后平滑切换，滑动约1.5秒；悬停暂停，左右滚动可手动切换")
+            }
             for sample in modelSpeeds.latestModelSamples {
                 let time = Date(timeIntervalSince1970: Double(sample.endedAtMs) / 1_000)
                     .formatted(.dateTime.month(.twoDigits).day(.twoDigits).hour().minute().second())
@@ -347,26 +374,117 @@ final class TokenBarStatusItemController: NSObject, NSMenuDelegate, TokenBarMenu
             case .antigravity: "Antigravity"
             case .zcode: "ZCode"
             }
-            toolTips.append(name + (details.isEmpty ? "" : " · " + details.joined(separator: " · "))
-                + Self.unreadStatusText(unread).toolTip)
+            self.statusCarouselContexts[platform] = StatusCarouselContext(activity: activity, details: details,
+                name: name, unread: unread)
             return StatusBarPlatformContent(
-                scope: scope, top: top.compactText, bottom: bottom.compactText,
+                scope: scope, top: rotatesTop ? selectedText ?? top.compactText : top.compactText,
+                bottom: rotatesBottom ? selectedText ?? bottom.compactText : bottom.compactText,
                 unreadCount: unread, trendRates: points?.map(\.tokensPerSecond),
                 trendMaximum: chartScale?.maximum,
                 speedTone: speedTone,
                 topIsSpeed: Self.isSpeedMetric(self.settings.statusBarTopMetric),
-                bottomIsSpeed: Self.isSpeedMetric(self.settings.statusBarBottomMetric))
+                bottomIsSpeed: Self.isSpeedMetric(self.settings.statusBarBottomMetric),
+                topSpeedTone: rotatesTop ? selectedTone : nil,
+                bottomSpeedTone: rotatesBottom ? selectedTone : nil,
+                topSpeedModel: rotatesTop ? selectedSample?.model : nil,
+                bottomSpeedModel: rotatesBottom ? selectedSample?.model : nil,
+                reservedSpeedTexts: hasCarousel
+                    ? self.statusSpeedCarousel.samples(for: platform).map { SpeedSummaryPresentation.rateValueText($0.tokensPerSecond) + "t/s" }
+                    : [])
         }
         self.scheduleStatusSpeedExpiry(at: activeDeadlines.min(), now: now)
         self.statusBarContents = contents
+        self.statusSpeedCarousel.synchronize(contents: contents,
+            latestTop: self.settings.statusBarTopMetric == .latestSpeed,
+            latestBottom: self.settings.statusBarBottomMetric == .latestSpeed)
+        self.renderStatusButton(transitions: self.statusSpeedCarousel.transitions)
+        self.updateStatusTooltips()
+    }
+
+    /// Selection changes only reformat cached samples; history is read when data changes.
+    private func statusModelSelectionDidChange() {
+        self.statusBarContents = self.statusBarContents.map { content in
+            let platform = content.scope.platform
+            let sample = self.statusSpeedCarousel.currentSample(for: platform)
+            let value = sample.map { SpeedSummaryPresentation.rateValueText($0.tokensPerSecond) + "t/s" }
+            let active = self.statusCarouselContexts[platform]?.activity.activeUntil.map { Date() < $0 } ?? false
+            let tone = StatusSpeedTone(isActive: active, tokensPerSecond: sample?.tokensPerSecond)
+            return StatusBarPlatformContent(scope: content.scope,
+                top: self.settings.statusBarTopMetric == .latestSpeed ? value ?? content.top : content.top,
+                bottom: self.settings.statusBarBottomMetric == .latestSpeed ? value ?? content.bottom : content.bottom,
+                unreadCount: content.unreadCount, trendRates: content.trendRates, trendMaximum: content.trendMaximum,
+                speedTone: content.speedTone, topIsSpeed: content.topIsSpeed, bottomIsSpeed: content.bottomIsSpeed,
+                topSpeedTone: self.settings.statusBarTopMetric == .latestSpeed ? tone : content.topSpeedTone,
+                bottomSpeedTone: self.settings.statusBarBottomMetric == .latestSpeed ? tone : content.bottomSpeedTone,
+                topSpeedModel: self.settings.statusBarTopMetric == .latestSpeed ? sample?.model : content.topSpeedModel,
+                bottomSpeedModel: self.settings.statusBarBottomMetric == .latestSpeed ? sample?.model : content.bottomSpeedModel,
+                reservedSpeedTexts: content.reservedSpeedTexts)
+        }
+        self.statusSpeedCarousel.synchronize(contents: self.statusBarContents,
+            latestTop: self.settings.statusBarTopMetric == .latestSpeed,
+            latestBottom: self.settings.statusBarBottomMetric == .latestSpeed)
+        self.renderStatusButton(transitions: self.statusSpeedCarousel.transitions)
+        self.updateStatusTooltips()
+    }
+
+    private func updateStatusTooltips() {
+        guard let button = self.statusItem.button else { return }
+        let tooltips = self.statusBarContents.compactMap { content -> String? in
+            let platform = content.scope.platform
+            guard let context = self.statusCarouselContexts[platform] else { return nil }
+            var details = context.details
+            if (self.settings.statusBarTopMetric == .latestSpeed || self.settings.statusBarBottomMetric == .latestSpeed),
+               let sample = self.statusSpeedCarousel.currentSample(for: platform) {
+                let note = context.activity.isActive ? "" : "（上次记录，当前空闲）"
+                details.insert("显示模型：\(sample.model) · \(SpeedSummaryPresentation.rateValueText(sample.tokensPerSecond)) tok/s\(note)", at: 0)
+            }
+            return context.name + " · " + details.joined(separator: " · ") + Self.unreadStatusText(context.unread).toolTip
+        }
+        button.toolTip = tooltips.joined(separator: "\n")
+        button.setAccessibilityLabel(tooltips.joined(separator: "。"))
+    }
+
+    private func renderStatusButton(transitions: [TokenPlatform: StatusSpeedTransition]) {
+        guard let button = self.statusItem.button else { return }
+        let contents = self.statusBarContents.map { content in
+            StatusBarPlatformContent(scope: content.scope, top: content.top, bottom: content.bottom,
+                unreadCount: content.unreadCount, trendRates: content.trendRates, trendMaximum: content.trendMaximum,
+                speedTone: content.speedTone, topIsSpeed: content.topIsSpeed, bottomIsSpeed: content.bottomIsSpeed,
+                topSpeedTone: content.topSpeedTone, bottomSpeedTone: content.bottomSpeedTone,
+                topSpeedModel: content.topSpeedModel, bottomSpeedModel: content.bottomSpeedModel,
+                speedTransition: transitions[content.scope.platform], reservedSpeedTexts: content.reservedSpeedTexts)
+        }
         var layout: StatusLabelLayout!
         button.effectiveAppearance.performAsCurrentDrawingAppearance {
             layout = StatusLabelRenderer.layout(contents: contents)
         }
         self.statusLabelLayout = layout
         button.image = layout.image
-        button.toolTip = toolTips.joined(separator: "\n")
-        button.setAccessibilityLabel(toolTips.joined(separator: "。"))
+        button.needsDisplay = true
+    }
+
+    private func platformForSpeedScroll(_ event: NSEvent) -> TokenPlatform? {
+        guard let button = self.statusItem.button, event.window === button.window,
+              let layout = self.statusLabelLayout
+        else { return nil }
+        let point = button.convert(event.locationInWindow, from: nil)
+        guard button.bounds.contains(point) else { return nil }
+        let imageX = point.x - (button.bounds.midX - layout.image.size.width / 2)
+        let imageY = point.y - (button.bounds.midY - layout.image.size.height / 2)
+        let scope = layout.scope(at: imageX)
+        guard let region = layout.regions.first(where: { $0.scope == scope }),
+              let content = self.statusBarContents.first(where: { $0.scope == scope })
+        else { return nil }
+        let geometry = StatusLabelRenderer.geometry(platform: scope.platform, top: content.top, bottom: content.bottom,
+            showsTrend: content.trendRates != nil, reservedSpeedTexts: content.reservedSpeedTexts)
+        let local = NSPoint(x: imageX - (region.centerX - geometry.size.width / 2), y: imageY)
+        if self.settings.statusBarTopMetric == .latestSpeed, geometry.topRect?.contains(local) == true {
+            return scope.platform
+        }
+        if self.settings.statusBarBottomMetric == .latestSpeed, geometry.bottomRect?.contains(local) == true {
+            return scope.platform
+        }
+        return nil
     }
 
     private func scheduleStatusSpeedExpiry(at deadline: Date?, now: Date) {
@@ -2000,6 +2118,25 @@ enum StatusSpeedTone: Equatable, Sendable {
     }
 }
 
+struct StatusSpeedTransition: Equatable, Sendable {
+    let previousTop: String?
+    let previousBottom: String?
+    let progress: Double
+    let direction: Int
+    let previousSpeedTone: StatusSpeedTone?
+    let previousModel: String?
+
+    init(previousTop: String? = nil, previousBottom: String? = nil, progress: Double,
+         direction: Int = 1, previousSpeedTone: StatusSpeedTone? = nil, previousModel: String? = nil) {
+        self.previousTop = previousTop
+        self.previousBottom = previousBottom
+        self.progress = progress
+        self.direction = direction
+        self.previousSpeedTone = previousSpeedTone
+        self.previousModel = previousModel
+    }
+}
+
 struct StatusBarPlatformContent: Equatable, Sendable {
     let scope: DashboardScope
     let top: String?
@@ -2011,10 +2148,19 @@ struct StatusBarPlatformContent: Equatable, Sendable {
     let speedTone: StatusSpeedTone
     let topIsSpeed: Bool
     let bottomIsSpeed: Bool
+    let speedTransition: StatusSpeedTransition?
+    let reservedSpeedTexts: [String]
+    let topSpeedTone: StatusSpeedTone?
+    let bottomSpeedTone: StatusSpeedTone?
+    let topSpeedModel: String?
+    let bottomSpeedModel: String?
 
     init(scope: DashboardScope, top: String?, bottom: String?, unreadCount: Int = 0, trendRates: [Double]? = nil,
          trendMaximum: Double? = nil,
-         speedTone: StatusSpeedTone = .idle, topIsSpeed: Bool = false, bottomIsSpeed: Bool = false) {
+         speedTone: StatusSpeedTone = .idle, topIsSpeed: Bool = false, bottomIsSpeed: Bool = false,
+         topSpeedTone: StatusSpeedTone? = nil, bottomSpeedTone: StatusSpeedTone? = nil,
+         topSpeedModel: String? = nil, bottomSpeedModel: String? = nil,
+         speedTransition: StatusSpeedTransition? = nil, reservedSpeedTexts: [String] = []) {
         self.scope = scope
         self.top = top
         self.bottom = bottom
@@ -2024,6 +2170,12 @@ struct StatusBarPlatformContent: Equatable, Sendable {
         self.speedTone = speedTone
         self.topIsSpeed = topIsSpeed
         self.bottomIsSpeed = bottomIsSpeed
+        self.speedTransition = speedTransition
+        self.reservedSpeedTexts = reservedSpeedTexts
+        self.topSpeedTone = topSpeedTone
+        self.bottomSpeedTone = bottomSpeedTone
+        self.topSpeedModel = topSpeedModel
+        self.bottomSpeedModel = bottomSpeedModel
     }
 }
 
@@ -2083,7 +2235,10 @@ enum StatusLabelRenderer {
             self.image(platform: content.scope.platform, top: content.top, bottom: content.bottom,
                        unreadCount: content.unreadCount, trendRates: content.trendRates,
                        trendMaximum: content.trendMaximum,
-                       speedTone: content.speedTone, topIsSpeed: content.topIsSpeed, bottomIsSpeed: content.bottomIsSpeed)
+                       speedTone: content.speedTone, topIsSpeed: content.topIsSpeed, bottomIsSpeed: content.bottomIsSpeed,
+                       topSpeedTone: content.topSpeedTone, bottomSpeedTone: content.bottomSpeedTone,
+                       topSpeedModel: content.topSpeedModel, bottomSpeedModel: content.bottomSpeedModel,
+                       speedTransition: content.speedTransition, reservedSpeedTexts: content.reservedSpeedTexts)
         }
         let gap: CGFloat = 7
         let size = NSSize(width: images.map(\.size.width).reduce(0, +) + gap * CGFloat(max(0, images.count - 1)), height: 20)
@@ -2096,7 +2251,7 @@ enum StatusLabelRenderer {
             }
             return true
         }
-        image.isTemplate = contents.allSatisfy { $0.speedTone == .idle }
+        image.isTemplate = images.allSatisfy(\.isTemplate)
         var regions: [StatusLabelLayout.Region] = []
         var x: CGFloat = 0
         for (index, content) in contents.enumerated() {
@@ -2133,13 +2288,13 @@ enum StatusLabelRenderer {
         self.image(platform: platform, top: today, bottom: weekly, unreadCount: unreadCount)
     }
 
-    static func geometry(platform: TokenPlatform?, top: String?, bottom: String?, showsTrend: Bool) -> Geometry {
+    static func geometry(platform: TokenPlatform?, top: String?, bottom: String?, showsTrend: Bool,
+                         reservedSpeedTexts: [String] = []) -> Geometry {
         let top = self.visibleText(top)
         let bottom = self.visibleText(bottom)
         let attributes = self.textAttributes
-        let width = min(54, ceil(max(
-            top.map { ($0 as NSString).size(withAttributes: attributes).width } ?? 0,
-            bottom.map { ($0 as NSString).size(withAttributes: attributes).width } ?? 0)))
+        let labels = [top, bottom].compactMap { $0 } + reservedSpeedTexts
+        let width = min(54, ceil(labels.map { ($0 as NSString).size(withAttributes: attributes).width }.max() ?? 0))
         let hasIcon = platform.flatMap { PlatformStatusIcon.image(for: $0) } != nil
         let widths: [CGFloat] = [hasIcon ? 15 : 0, showsTrend ? 34 : 0, width].filter { $0 > 0 }
         let contentWidth = widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) * 4
@@ -2165,13 +2320,19 @@ enum StatusLabelRenderer {
     static func image(
         platform: TokenPlatform? = nil, top: String?, bottom: String?, unreadCount: Int = 0,
         trendRates: [Double]? = nil, trendMaximum: Double? = nil, speedTone: StatusSpeedTone = .idle,
-        topIsSpeed: Bool = false, bottomIsSpeed: Bool = false) -> NSImage
+        topIsSpeed: Bool = false, bottomIsSpeed: Bool = false,
+        topSpeedTone: StatusSpeedTone? = nil, bottomSpeedTone: StatusSpeedTone? = nil,
+        topSpeedModel: String? = nil, bottomSpeedModel: String? = nil,
+        speedTransition: StatusSpeedTransition? = nil, reservedSpeedTexts: [String] = []) -> NSImage
     {
-        let geometry = self.geometry(platform: platform, top: top, bottom: bottom, showsTrend: trendRates != nil)
+        let geometry = self.geometry(platform: platform, top: top, bottom: bottom, showsTrend: trendRates != nil,
+                                     reservedSpeedTexts: reservedSpeedTexts)
         let icon = platform.flatMap { PlatformStatusIcon.image(for: $0) }
         let badge = icon != nil && unreadCount > 0 ? StatusUnreadBadge(count: unreadCount) : nil
         let top = self.visibleText(top)
         let bottom = self.visibleText(bottom)
+        let topSpeedModel = self.visibleText(topSpeedModel)
+        let bottomSpeedModel = self.visibleText(bottomSpeedModel)
         let attributes = self.textAttributes
         let image = NSImage(size: geometry.size, flipped: false) { _ in
             if let icon, let rect = geometry.iconRect {
@@ -2195,18 +2356,61 @@ enum StatusLabelRenderer {
             }
             if let top, let rect = geometry.topRect {
                 var textAttributes = attributes
-                if topIsSpeed { textAttributes[.foregroundColor] = speedTone.color }
-                (top as NSString).draw(in: rect, withAttributes: textAttributes)
+                if topIsSpeed {
+                    textAttributes[.foregroundColor] = topSpeedModel.map(self.modelSpeedColor) ?? (topSpeedTone ?? speedTone).color
+                }
+                self.drawText(top, previous: topIsSpeed ? speedTransition?.previousTop : nil,
+                              in: rect, attributes: textAttributes, transition: speedTransition)
             }
             if let bottom, let rect = geometry.bottomRect {
                 var textAttributes = attributes
-                if bottomIsSpeed { textAttributes[.foregroundColor] = speedTone.color }
-                (bottom as NSString).draw(in: rect, withAttributes: textAttributes)
+                if bottomIsSpeed {
+                    textAttributes[.foregroundColor] = bottomSpeedModel.map(self.modelSpeedColor) ?? (bottomSpeedTone ?? speedTone).color
+                }
+                self.drawText(bottom, previous: bottomIsSpeed ? speedTransition?.previousBottom : nil,
+                              in: rect, attributes: textAttributes, transition: speedTransition)
             }
             return true
         }
-        image.isTemplate = speedTone == .idle
+        let hasPreviousColor = speedTransition.map { transition in
+            transition.progress.isFinite && transition.progress < 1
+                && (self.visibleText(transition.previousModel) != nil || (transition.previousSpeedTone ?? .idle) != .idle)
+                && ((topIsSpeed && self.visibleText(transition.previousTop) != nil)
+                    || (bottomIsSpeed && self.visibleText(transition.previousBottom) != nil))
+        } ?? false
+        let hasCurrentColor = speedTone != .idle
+            || (top != nil && topIsSpeed && (topSpeedModel != nil || (topSpeedTone ?? speedTone) != .idle))
+            || (bottom != nil && bottomIsSpeed && (bottomSpeedModel != nil || (bottomSpeedTone ?? speedTone) != .idle))
+        image.isTemplate = !hasCurrentColor && !hasPreviousColor
         return image
+    }
+
+    private static func drawText(_ text: String, previous: String?, in rect: NSRect,
+                                 attributes: [NSAttributedString.Key: Any], transition: StatusSpeedTransition?) {
+        guard let previous = self.visibleText(previous), let transition,
+              transition.progress.isFinite, transition.progress < 1 else {
+            (text as NSString).draw(in: rect, withAttributes: attributes)
+            return
+        }
+        let progress = CGFloat(max(0, transition.progress))
+        let direction: CGFloat = transition.direction < 0 ? -1 : 1
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSBezierPath(rect: rect).addClip()
+        var previousAttributes = attributes
+        if let model = self.visibleText(transition.previousModel) {
+            previousAttributes[.foregroundColor] = self.modelSpeedColor(model)
+        } else if let tone = transition.previousSpeedTone {
+            previousAttributes[.foregroundColor] = tone.color
+        }
+        (previous as NSString).draw(in: rect.offsetBy(dx: -direction * progress * rect.width, dy: 0),
+                                   withAttributes: previousAttributes)
+        (text as NSString).draw(in: rect.offsetBy(dx: direction * (1 - progress) * rect.width, dy: 0),
+                               withAttributes: attributes)
+    }
+
+    static func modelSpeedColor(_ model: String) -> NSColor {
+        NSColor(SpeedTrendChartView.modelColor(model: model, accentColor: .accentColor))
     }
 
     private static var textAttributes: [NSAttributedString.Key: Any] {
