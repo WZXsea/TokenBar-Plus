@@ -30,7 +30,7 @@ TokenBar Plus 是 [WZXsea](https://github.com/WZXsea) 基于 [wuruoye / TokenBar
 | --- | --- |
 | 中文界面 | 常用面板、设置、额度及请求详情使用中文，压缩重复说明与区块空隙。 |
 | 生成速度 | 独立的大字号速度区块；按模型筛选；带坐标轴、平滑曲线和模型配色的历史采样图。 |
-| 菜单栏 | 自选两项摘要指标，并可显示小型速度曲线；活跃时绿色，低于 20 tok/s 时红色，空闲时恢复普通颜色。 |
+| 菜单栏 | 自选两项摘要指标；多模型速率数字缓慢轮播，沿用模型配色；小型速度曲线通过颜色呈现活跃和低速状态。 |
 | 套餐识别 | 根据服务返回的套餐标识显示徽标；PRO 使用金色皇冠文字标识，PLUS 使用普通标签。 |
 | 面板布局 | 自选显示区块及上下顺序，记忆统计可按需展示。 |
 | 分日额度 | 区分今日、昨日与更早或尚未归属的周额度；“今日”显示观测到的当日额度增量。 |
@@ -81,7 +81,7 @@ ZCode 显示为独立平台，可在“设置 → 显示 ZCode”中切换。统
 | --- | --- |
 | ![PRO 金色徽标与每周额度](docs/images/plus-plan-pro.png) | ![PLUS 普通标签与五小时额度](docs/images/plus-plan-plus.png) |
 
-菜单栏根据最近 60 秒内该平台的会话或请求时间判断活跃状态。活跃且速度达到 20 tok/s 时，速率数值和小折线显示绿色；低于 20 tok/s 时显示红色。空闲时保留最后一次记录的速率，并恢复系统普通颜色；历史曲线与今日平均值保留统计值。有效速率缺失时使用普通颜色，状态只通过颜色呈现。
+菜单栏根据最近 60 秒内该平台的会话或请求时间判断活跃状态。小折线在活跃且速度达到 20 tok/s 时显示绿色，低于 20 tok/s 时显示红色，空闲时恢复系统普通颜色。速率数字沿用对应模型的配色，空闲时保留最近采样值；历史曲线与今日平均值保留统计值。有效速率缺失时使用普通颜色。
 
 ### 使用记录
 
@@ -107,7 +107,11 @@ ZCode 显示为独立平台，可在“设置 → 显示 ZCode”中切换。统
 
 ## 快速开始
 
-本次提供源码，可直接[下载源码 ZIP](https://github.com/WZXsea/TokenBar-Plus/archive/refs/heads/main.zip)，或按下方命令克隆构建。最低部署目标为 macOS 14，当前本机构建验证覆盖 Apple Silicon。
+从 [GitHub Releases](https://github.com/WZXsea/TokenBar-Plus/releases) 下载应用包。首个版本为 [v0.1.0-plus.1 预览版](https://github.com/WZXsea/TokenBar-Plus/releases/tag/v0.1.0-plus.1)，提供 macOS 14+、Apple Silicon（M 系列芯片）构建和 SHA-256 校验文件。
+
+解压 ZIP，将 `TokenBar.app` 拖到“应用程序”文件夹。已有用户先退出 TokenBar，再替换原应用，原有设置继续沿用。该预览版采用 ad-hoc 签名，Apple 公证状态为待完成；首次打开遇到系统拦截时，可在“系统设置 → 隐私与安全性”中核对应用来源后选择“仍要打开”。版本内容及安装细节见[发布说明](docs/releases/v0.1.0-plus.1.md)。
+
+也可以[下载源码 ZIP](https://github.com/WZXsea/TokenBar-Plus/archive/refs/heads/main.zip)，或按下方命令克隆构建。当前本机构建验证覆盖 Apple Silicon。
 
 ```bash
 git clone https://github.com/WZXsea/TokenBar-Plus.git
@@ -136,7 +140,7 @@ bash Scripts/install_app.sh
 
 需要 Swift 6.2 或更高版本，以及带 Cargo 的稳定版 Rust 工具链。`Scripts/package_app.sh` 构建 Swift 应用与 Rust helper，并生成当前机器架构的 `TokenBar.app`。
 
-默认生成的应用采用本地临时签名，适用于本机开发验证。面向其他用户的正式应用分发需要配置 Developer ID 签名与 Apple 公证。较新 Command Line Tools 与 SDK 的适配方法、验证命令及发布流程见 [构建说明](docs/BUILDING.md)。原项目的完整统计、同步与架构说明保留在 [上游 README](README.upstream.md)。
+默认生成的应用采用 ad-hoc 签名，GitHub 提供相同签名方式的预览构建。Developer ID 签名与 Apple 公证的正式分发流程由 `Scripts/release_app.sh` 提供。较新 Command Line Tools 与 SDK 的适配方法、验证命令及发布流程见 [构建说明](docs/BUILDING.md)。原项目的完整统计、同步与架构说明保留在 [上游 README](README.upstream.md)。
 
 ## 来源与许可
 
