@@ -107,9 +107,15 @@ ZCode 显示为独立平台，可在“设置 → 显示 ZCode”中切换。统
 
 ## 快速开始
 
-从 [GitHub Releases](https://github.com/WZXsea/TokenBar-Plus/releases) 下载应用包。首个版本为 [v0.1.0-plus.1 预览版](https://github.com/WZXsea/TokenBar-Plus/releases/tag/v0.1.0-plus.1)，提供 macOS 14+、Apple Silicon（M 系列芯片）构建和 SHA-256 校验文件。
+从 [GitHub Releases](https://github.com/WZXsea/TokenBar-Plus/releases) 下载应用包。[v0.1.0-plus.1 预览版](https://github.com/WZXsea/TokenBar-Plus/releases/tag/v0.1.0-plus.1)面向 macOS 14+、Apple Silicon（M 系列芯片），首选 `TokenBar-Plus-v0.1.0-plus.1-macos-arm64.dmg`，ZIP 保留为备用格式；校验文件为 `SHA256SUMS.txt`。
 
-解压 ZIP，将 `TokenBar.app` 拖到“应用程序”文件夹。已有用户先退出 TokenBar，再替换原应用，原有设置继续沿用。该预览版采用 ad-hoc 签名，Apple 公证状态为待完成；首次打开遇到系统拦截时，可在“系统设置 → 隐私与安全性”中核对应用来源后选择“仍要打开”。版本内容及安装细节见[发布说明](docs/releases/v0.1.0-plus.1.md)。
+打开 DMG，在安装窗口中将左侧 `TokenBar` 拖到右侧“应用程序”入口，再从“应用程序”启动 TokenBar，最后推出安装磁盘。已有用户先退出 TokenBar，再替换原应用，原有设置继续沿用。选择 ZIP 时，解压后将 `TokenBar.app` 拖入“应用程序”文件夹。
+
+<p align="center">
+  <img src="docs/images/plus-installer.png" width="680" alt="TokenBar Plus DMG 安装窗口：将左侧应用拖到右侧应用程序入口">
+</p>
+
+DMG 与应用采用 ad-hoc 签名，Apple 公证状态为待完成；首次打开遇到系统拦截时，可在“系统设置 → 隐私与安全性”中核对应用来源后选择“仍要打开”。版本内容、校验方法及安装细节见[发布说明](docs/releases/v0.1.0-plus.1.md)。
 
 也可以[下载源码 ZIP](https://github.com/WZXsea/TokenBar-Plus/archive/refs/heads/main.zip)，或按下方命令克隆构建。当前本机构建验证覆盖 Apple Silicon。
 

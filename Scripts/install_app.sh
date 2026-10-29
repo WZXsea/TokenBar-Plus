@@ -55,7 +55,8 @@ codesign --verify --deep --strict "$DESTINATION"
 cmp "$SOURCE/Contents/MacOS/TokenBar" "$DESTINATION/Contents/MacOS/TokenBar"
 cmp "$SOURCE/Contents/Helpers/tokenbar-helper" "$DESTINATION/Contents/Helpers/tokenbar-helper"
 ditto -c -k --sequesterRsrc --keepParent "$SOURCE" "$ROOT/.build/install/TokenBar-current.zip"
-"$LSREGISTER" -u "$SOURCE"
+# 尚未被 Finder/Spotlight 注册的构建副本也可以正常完成安装。
+"$LSREGISTER" -u "$SOURCE" || true
 rm -rf -- "$SOURCE"
 "$LSREGISTER" -f "$DESTINATION"
 echo "Installed $DESTINATION; build and rollback copies are ZIP archives in .build/install."

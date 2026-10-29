@@ -18,6 +18,33 @@ cargo test --manifest-path Helper/Cargo.toml --locked
 
 `package_app.sh` 默认创建当前主机架构的 ad-hoc 签名开发构建。正式对外分发可使用上游保留的 `Scripts/release_app.sh`，配置 Developer ID 和 Apple 公证；完整参数见 [上游说明](https://github.com/wuruoye/TokenBar#build-and-run)。
 
+## DMG 拖拽安装界面
+
+`Scripts/build_dmg.py` 将现有应用包封装为带中文背景的安装磁盘。打开 DMG 后，左侧为 TokenBar，右侧为指向 `/Applications` 的“应用程序”入口，用户拖动应用即可安装。打包保留输入应用的内容与签名方式；预览版使用 ad-hoc 签名，Apple 公证待完成。
+
+先完成应用打包，再使用 Python 3.10+ 创建独立工具环境并生成 DMG：
+
+```bash
+python3 -m venv .build/dmg-tools
+.build/dmg-tools/bin/python -m pip install -r Scripts/requirements-dmg.txt
+mkdir -p dist
+.build/dmg-tools/bin/python Scripts/build_dmg.py \
+  --app TokenBar.app \
+  --background Resources/Installer/background.png \
+  --output dist/TokenBar-Plus-v0.1.0-plus.1-macos-arm64.dmg
+```
+
+`--app` 也可指向其他已打包的应用路径。上述输出文件名对应本次 Apple Silicon 预览版，其他构建应按实际版本与架构命名。`Scripts/requirements-dmg.txt` 锁定 DMG 工具依赖；背景图片随源码保存，窗口布局由脚本生成。
+
+背景使用 AppKit 绘制，可通过 `swift Scripts/render_installer_background.swift Resources/Installer/background.png` 重新生成。窗口保留额外高度，以容纳 Finder 的标签栏与路径栏。打包脚本验证输入及复制后的应用签名，再校验生成的 DMG。
+
+分发前挂载 DMG，核对安装窗口、应用签名与架构，并为实际上传文件生成校验值：
+
+```bash
+hdiutil verify dist/TokenBar-Plus-v0.1.0-plus.1-macos-arm64.dmg
+shasum -a 256 dist/TokenBar-Plus-v0.1.0-plus.1-macos-arm64.dmg
+```
+
 ## Command Line Tools 的兼容构建
 
 本机验证环境为 Apple Swift 6.4、Command Line Tools，并同时安装了 macOS 26.5 和 27.0 SDK。默认 27.0 SDK 的 SwiftUI 宏组件在该环境中缺失，以下命令显式选择已安装的 26.5 SDK 与 native 构建引擎。
