@@ -2,7 +2,7 @@ use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,14 +30,14 @@ use tokenbar_helper::pricing::{
 use tokenbar_helper::usage::ServiceTier;
 use tokenbar_helper::{
     build_snapshot_with_platform_resets, extract_request_detail as extract_codex_request_detail,
-    load_claude_session_titles, load_codex_session_titles, normalize_codex_reasoning_usage,
+    load_claude_session_titles_with_cache_home, load_codex_session_titles_with_cache_home, normalize_codex_reasoning_usage,
     StatisticsTimeZone,
 };
 
 const DEFAULT_DAYS: usize = 30;
 use tokenbar_helper::zcode::{parse_local_zcode_messages, load_zcode_session_titles, extract_request_detail as extract_zcode_request_detail, LocalParseOptions as ZCodeParseOptions};
 
-const USAGE: &str = "usage: tokenbar-helper [--days COUNT] [--end-date YYYY-MM-DD] [--home-dir PATH] [--statistics-timezone utc|local] [--weekly-reset-ms MS] [--claude-weekly-reset-ms MS] [--grok-weekly-reset-ms MS] [--antigravity-weekly-reset-ms MS] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--custom-pricing-json PATH] [--memory-database PATH] [--offline-pricing]\n       tokenbar-helper price-quote --platform codex|claude|grok|antigravity|zcode --model ID --service-tier standard|fast [--home-dir PATH] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--offline-pricing]\n       tokenbar-helper request-detail [--platform codex|claude|grok|antigravity|zcode] --session-path PATH --start-ms MS --end-ms MS\n       tokenbar-helper memory-receiver --database PATH [--status-file PATH] [--port PORT] [--parent-pid PID]";
+const USAGE: &str = "usage: tokenbar-helper [--days COUNT] [--end-date YYYY-MM-DD] [--home-dir PATH] [--statistics-timezone utc|local] [--weekly-reset-ms MS] [--claude-weekly-reset-ms MS] [--grok-weekly-reset-ms MS] [--antigravity-weekly-reset-ms MS] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--custom-pricing-json PATH] [--memory-database PATH] [--offline-pricing]\n       tokenbar-helper serve\n       tokenbar-helper price-quote --platform codex|claude|grok|antigravity|zcode --model ID --service-tier standard|fast [--home-dir PATH] [--openai-pricing-markdown PATH] [--anthropic-pricing-markdown PATH] [--openrouter-pricing-json PATH] [--offline-pricing]\n       tokenbar-helper request-detail [--platform codex|claude|grok|antigravity|zcode] --session-path PATH --start-ms MS --end-ms MS\n       tokenbar-helper memory-receiver --database PATH [--status-file PATH] [--port PORT] [--parent-pid PID]";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SnapshotConfig {
@@ -96,6 +96,7 @@ struct PriceQuoteConfig {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
+    Serve,
     Snapshot(SnapshotConfig),
     PriceQuote(PriceQuoteConfig),
     RequestDetail(RequestDetailConfig),
@@ -109,6 +110,7 @@ struct CodexAuthConfig {
 
 fn main() -> Result<(), Box<dyn Error>> {
     match parse_args(env::args_os().skip(1))? {
+        Command::Serve => run_serve(),
         Command::Snapshot(config) => run_snapshot(config),
         Command::PriceQuote(config) => write_json(&automatic_price_quote(&config)),
         Command::RequestDetail(config) => {
@@ -144,6 +146,38 @@ fn main() -> Result<(), Box<dyn Error>> {
             write_json(&detail)
         }
         Command::MemoryReceiver(config) => run_receiver(config).map_err(io::Error::other).map_err(Into::into),
+    }
+}
+
+/// Each request is one JSON array containing the ordinary snapshot CLI args.
+/// A closed parent stdin ends the worker and drops all in-memory parse results.
+fn run_serve() -> Result<(), Box<dyn Error>> {
+    for line in io::stdin().lock().lines() {
+        if let Err(error) = run_serve_request(&line?) {
+            write_json(&serde_json::json!({"helperError": error.to_string()}))?;
+        }
+        release_unused_heap_pages();
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+}
+
+fn release_unused_heap_pages() {
+    #[cfg(target_os = "macos")]
+    // Release allocator pages left by completed scans, while live cache buffers
+    // remain owned. NULL and zero ask all malloc zones to return unused pages.
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0); }
+}
+
+fn run_serve_request(line: &str) -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = serde_json::from_str(line)?;
+    match parse_args(args.into_iter().map(OsString::from)).map_err(io::Error::other)? {
+        Command::Snapshot(config) => run_snapshot(config),
+        _ => Err("serve requests must contain snapshot arguments".into()),
     }
 }
 
@@ -226,7 +260,7 @@ fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
     });
     let mut session_titles = session_index_path
         .as_deref()
-        .map(|path| load_codex_session_titles(&codex_messages, path))
+        .map(|path| load_codex_session_titles_with_cache_home(&codex_messages, path, home_dir.as_deref()))
         .unwrap_or_default();
     let anthropic_pricing = config
         .anthropic_pricing_markdown
@@ -244,7 +278,7 @@ fn run_snapshot(config: SnapshotConfig) -> Result<(), Box<dyn Error>> {
         &anthropic_pricing,
     )
     .map_err(io::Error::other)?;
-    session_titles.extend(load_claude_session_titles(&claude_messages));
+    session_titles.extend(load_claude_session_titles_with_cache_home(&claude_messages, home_dir.as_deref()));
     let zcode_options=ZCodeParseOptions {home_dir:home_dir.clone(),use_env_roots,since:Some(parse_first_day.format("%Y-%m-%d").to_string()),until:Some(parse_last_day.format("%Y-%m-%d").to_string())};
     let mut zcode_messages=parse_local_zcode_messages(zcode_options.clone()).map_err(io::Error::other)?;
     session_titles.extend(load_zcode_session_titles(&zcode_options));
@@ -461,6 +495,7 @@ fn write_json(value: &impl serde::Serialize) -> Result<(), Box<dyn Error>> {
     let mut output = stdout.lock();
     serde_json::to_writer(&mut output, value)?;
     writeln!(output)?;
+    output.flush()?;
     Ok(())
 }
 
@@ -469,6 +504,10 @@ fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, Strin
     let Some(first) = args.next() else {
         return Ok(Command::Snapshot(SnapshotConfig::default()));
     };
+
+    if first.to_str() == Some("serve") {
+        return if args.next().is_none() { Ok(Command::Serve) } else { Err("serve reads snapshot argument arrays from stdin".to_string()) };
+    }
 
     if first.to_str() == Some("request-detail") {
         return parse_request_detail_args(args).map(Command::RequestDetail);

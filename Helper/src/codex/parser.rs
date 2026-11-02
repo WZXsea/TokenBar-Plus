@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::usage::{
@@ -231,9 +231,10 @@ struct CodexParseState {
 pub(super) struct ParsedCodexFile {
     pub(super) messages: Vec<UnifiedMessage>,
     pub(super) service_tier_snapshots: Vec<ServiceTierSnapshot>,
+    pub(super) read_complete: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct ServiceTierSnapshot {
     pub(super) timestamp_ms: i64,
     pub(super) tier: ServiceTier,
@@ -262,6 +263,7 @@ fn parse_codex_reader<R: BufRead>(
     let mut service_tier_snapshots = Vec::new();
     let mut pending_model_messages = Vec::new();
     let mut line = String::with_capacity(4096);
+    let mut read_complete = true;
 
     loop {
         line.clear();
@@ -271,7 +273,10 @@ fn parse_codex_reader<R: BufRead>(
             // A rollout can be observed while Codex is partway through writing
             // a UTF-8 code point. Keep the valid prefix instead of dropping the
             // entire session for this refresh.
-            Err(_) => break,
+            Err(_) => {
+                read_complete = false;
+                break;
+            }
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -722,6 +727,7 @@ fn parse_codex_reader<R: BufRead>(
     Ok(ParsedCodexFile {
         messages,
         service_tier_snapshots,
+        read_complete,
     })
 }
 

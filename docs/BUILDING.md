@@ -31,7 +31,7 @@ mkdir -p dist
 .build/dmg-tools/bin/python Scripts/build_dmg.py \
   --app TokenBar.app \
   --background Resources/Installer/background.png \
-  --output dist/TokenBar-Plus-v0.1.0-plus.1-macos-arm64.dmg
+  --output dist/TokenBar-Plus-v0.1.1-plus.1-macos-arm64.dmg
 ```
 
 `--app` 也可指向其他已打包的应用路径。上述输出文件名对应本次 Apple Silicon 预览版，其他构建应按实际版本与架构命名。`Scripts/requirements-dmg.txt` 锁定 DMG 工具依赖；背景图片随源码保存，窗口布局由脚本生成。
@@ -41,9 +41,19 @@ mkdir -p dist
 分发前挂载 DMG，核对安装窗口、应用签名与架构，并为实际上传文件生成校验值：
 
 ```bash
-hdiutil verify dist/TokenBar-Plus-v0.1.0-plus.1-macos-arm64.dmg
-shasum -a 256 dist/TokenBar-Plus-v0.1.0-plus.1-macos-arm64.dmg
+hdiutil verify dist/TokenBar-Plus-v0.1.1-plus.1-macos-arm64.dmg
+shasum -a 256 dist/TokenBar-Plus-v0.1.1-plus.1-macos-arm64.dmg
 ```
+
+当前性能优化版本的标签为 `v0.1.1-plus.1`，应用内版本为 `0.1.1`、构建号 `2`。DMG 与 ZIP 使用各自的版本化文件名，共同列入 `SHA256SUMS.txt`；历史标签与资产保留。发行内容与适用范围见[本版说明](releases/v0.1.1-plus.1.md)。
+
+## 常驻 helper 与开发覆盖
+
+默认捆绑 helper 通过 `serve` 命令接收逐行 JSON 参数数组，复用当前进程中的文件解析缓存。常规快照与历史查询使用独立通道；后者继续执行一次性 CLI，查询较长历史时也能保留常规刷新响应。
+
+缓存估算预算为 64 MiB、最多 4,096 项、30 分钟过期，近期访问条目受保护。日期、价格和子会话归属每次请求重新计算。停止服务会回收空闲或活动 worker，后续请求可重建；取消、超时、EOF 及崩溃恢复均有回归覆盖。
+
+通过显式 `helperURL` 或 `TOKENBAR_HELPER_PATH` 指定自定义 helper 时，默认使用原有一次性 CLI；开发者可显式注入 `PersistentActivityHelperRunner` 测试 `serve` 协议。常驻 worker 默认设置 `RAYON_NUM_THREADS=2`，显式传入的同名环境变量继续优先。统计时区变化会通过环境变更重建 worker。
 
 ## Command Line Tools 的兼容构建
 
@@ -103,7 +113,7 @@ swift test --build-system native \
 cargo test --manifest-path Helper/Cargo.toml --locked
 ```
 
-2026-10-28 精简测试集：Swift 37 项、Rust 19 项（含 ZCode、事件追扫、并行模型、曲线显示范围与数字轮播回归）。保留额度与套餐解析、缓存兼容、重置与每日用量、实时速率边界、自定义计费、历史聚合，以及菜单栏颜色和会话徽标的关键回归；合并重复用例，清理大规模布局排列与辅助测试。完整历史测试集可从提交 `05db64c` 恢复。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
+2026-11-02 性能优化测试集为 Swift 43 项、Rust 25 项，包含文件缓存失效、部分 UTF-8 末行、读取失败后重试、日期与定价重算、子会话归属、额度重排、常驻进程复用、取消／超时／EOF 恢复、停止回收、旧 helper 兼容和历史查询隔离。既有额度与套餐解析、每日用量、速率、自定义计费、历史聚合及菜单栏显示回归继续保留；完整历史测试集可从提交 `05db64c` 恢复。资源采样和统计一致性结果见[性能报告](PERFORMANCE-2026-11-02.md)。Windows 客户端与自托管同步服务保留上游实现，本次改进验收范围为 macOS。
 
 ## 文档配图
 

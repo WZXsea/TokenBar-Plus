@@ -68,8 +68,14 @@ public final class DashboardModel {
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private let calendar: Calendar
     @ObservationIgnored private var quotaTimerTask: Task<Void, Never>?
+    @ObservationIgnored private var automaticQuotaRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var automaticQuotaRefreshGeneration = 0
     @ObservationIgnored private var refreshAllTask: Task<Void, Never>?
     @ObservationIgnored private var activityRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var automaticActivityRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var automaticActivityRefreshGeneration = 0
+    @ObservationIgnored private let activityRefreshClock = ContinuousClock()
+    @ObservationIgnored private var lastActivityRefreshCompletedAt: ContinuousClock.Instant?
     @ObservationIgnored private var activityRefreshGeneration = 0
     @ObservationIgnored private var activityRefreshNeedsFollowUp = false
     @ObservationIgnored private var lastQuotaRefreshAttemptAt: [TokenPlatform: Date] = [:]
@@ -180,29 +186,36 @@ public final class DashboardModel {
         self.isStarted = false
         self.quotaTimerTask?.cancel()
         self.quotaTimerTask = nil
+        self.automaticQuotaRefreshGeneration += 1
+        self.automaticQuotaRefreshTask?.cancel()
+        self.automaticQuotaRefreshTask = nil
         self.refreshAllTask?.cancel()
         self.refreshAllTask = nil
         self.activityRefreshGeneration += 1
         self.activityRefreshTask?.cancel()
         self.activityRefreshTask = nil
+        self.activityService.stop()
         self.activityRefreshNeedsFollowUp = false
+        self.automaticActivityRefreshGeneration += 1
+        self.automaticActivityRefreshTask?.cancel()
+        self.automaticActivityRefreshTask = nil
     }
 
-    /// Source writes refresh local usage immediately. Writes arriving during a
-    /// scan coalesce into one follow-up so the latest append is not left waiting.
+    /// Source writes wake an idle dashboard immediately. Active writes and timer
+    /// ticks share one pending refresh, with a pause after each completed scan.
     public func notifyActivityChanged() {
         guard self.isStarted else { return }
         let now = self.now()
         let wasIdle = self.activityRefreshPolicy.isIdle(at: now)
         self.activityRefreshPolicy.recordSourceChange(at: now)
         if wasIdle {
+            self.automaticActivityRefreshGeneration += 1
+            self.automaticActivityRefreshTask?.cancel()
+            self.automaticActivityRefreshTask = nil
             self.startRefreshTimers()
         }
         self.activityRefreshNeedsFollowUp = true
-        Task { @MainActor [weak self] in
-            guard let self, self.isStarted else { return }
-            await self.refreshActivity()
-        }
+        self.scheduleAutomaticActivityRefresh(immediately: wasIdle)
     }
 
     var effectiveBackgroundRefreshInterval: Duration {
@@ -330,6 +343,9 @@ public final class DashboardModel {
                         for: platform)
                     savedSnapshot = true
                 case let .cancelled(platform):
+                    if self.lastQuotaRefreshAttemptAt[platform] == attemptedAt {
+                        self.lastQuotaRefreshAttemptAt.removeValue(forKey: platform)
+                    }
                     let state = previous[platform] ?? DashboardSourceState()
                     self.setQuotaState(state, for: platform)
                 case let .failure(platform, message):
@@ -726,25 +742,29 @@ public final class DashboardModel {
             self.activityRefreshGeneration += 1
             self.activityRefreshTask?.cancel()
             self.activityRefreshTask = nil
-        } else if self.activityRefreshTask != nil {
+        } else if let activityRefreshTask = self.activityRefreshTask {
+            await activityRefreshTask.value
             return
         }
+        self.activityRefreshNeedsFollowUp = false
         let generation = self.activityRefreshGeneration
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer {
+                if generation == self.activityRefreshGeneration {
+                    self.activityRefreshTask = nil
+                    self.lastActivityRefreshCompletedAt = self.activityRefreshClock.now
+                }
+            }
             await self.performActivityRefresh(generation: generation)
         }
         self.activityRefreshTask = task
         await task.value
-        if generation == self.activityRefreshGeneration {
-            self.activityRefreshTask = nil
-        }
     }
 
     private func performActivityRefresh(generation: Int) async {
         guard generation == self.activityRefreshGeneration else { return }
         while generation == self.activityRefreshGeneration {
-            self.activityRefreshNeedsFollowUp = false
             self.activity = DashboardSourceState(
                 value: self.activity.value,
                 isRefreshing: true,
@@ -771,7 +791,6 @@ public final class DashboardModel {
                 self.activity = DashboardSourceState(value: snapshot)
                 try? await self.cache?.saveActivity(snapshot)
                 guard generation == self.activityRefreshGeneration else { return }
-                if self.activityRefreshNeedsFollowUp { continue }
                 return
             } catch is CancellationError {
                 guard generation == self.activityRefreshGeneration else { return }
@@ -785,17 +804,88 @@ public final class DashboardModel {
                 self.activity = DashboardSourceState(
                     value: self.activity.value,
                     errorMessage: error.localizedDescription)
-                if self.activityRefreshNeedsFollowUp { continue }
                 return
             }
         }
+    }
+
+    private var automaticActivityPollIsDue: Bool {
+        guard let completedAt = self.lastActivityRefreshCompletedAt else { return true }
+        return completedAt.duration(to: self.activityRefreshClock.now) >= self.effectiveBackgroundRefreshInterval
+    }
+
+    @discardableResult
+    private func scheduleAutomaticActivityRefresh(immediately: Bool = false) -> Task<Void, Never> {
+        if let task = self.automaticActivityRefreshTask { return task }
+        self.automaticActivityRefreshGeneration += 1
+        let generation = self.automaticActivityRefreshGeneration
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == self.automaticActivityRefreshGeneration {
+                    self.automaticActivityRefreshTask = nil
+                    if self.isStarted, self.activityRefreshNeedsFollowUp, !Task.isCancelled {
+                        self.scheduleAutomaticActivityRefresh()
+                    }
+                }
+            }
+            // A manual or startup scan can already cover the timer tick. A
+            // source event during that scan remains pending for the next pass.
+            if let running = self.activityRefreshTask {
+                await running.value
+                return
+            }
+            if !immediately {
+                // Event wake-ups stay responsive at slower polling settings;
+                // the one-second setting also bounds sustained event traffic.
+                let minimumPause = min(self.activityRefreshInterval, .seconds(1))
+                while let completedAt = self.lastActivityRefreshCompletedAt {
+                    let remaining = minimumPause - completedAt.duration(to: self.activityRefreshClock.now)
+                    guard remaining > .zero else { break }
+                    do { try await self.sleep(remaining) } catch { return }
+                    guard !Task.isCancelled, self.isStarted else { return }
+                }
+            }
+            guard !Task.isCancelled, self.isStarted,
+                  self.activityRefreshNeedsFollowUp || self.automaticActivityPollIsDue
+            else { return }
+            await self.refreshActivity()
+        }
+        self.automaticActivityRefreshTask = task
+        return task
+    }
+
+    private func scheduleAutomaticQuotaRefresh() -> Task<Void, Never> {
+        if let task = self.automaticQuotaRefreshTask { return task }
+        self.automaticQuotaRefreshGeneration += 1
+        let generation = self.automaticQuotaRefreshGeneration
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == self.automaticQuotaRefreshGeneration {
+                    self.automaticQuotaRefreshTask = nil
+                }
+            }
+            await self.refreshQuotas(force: false)
+        }
+        self.automaticQuotaRefreshTask = task
+        return task
+    }
+
+    private func refreshAutomatically() async {
+        // Timer rescheduling changes cadence, while an in-flight remote request
+        // remains owned by the dashboard until completion or stop().
+        let quotas = self.scheduleAutomaticQuotaRefresh()
+        if self.activityRefreshNeedsFollowUp || self.automaticActivityPollIsDue {
+            await self.scheduleAutomaticActivityRefresh().value
+        }
+        await quotas.value
     }
 
     private func startRefreshTimers(refreshImmediately: Bool = false) {
         self.quotaTimerTask?.cancel()
         self.quotaTimerTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let clock = ContinuousClock()
             var delay = refreshImmediately ? Duration.zero : self.effectiveBackgroundRefreshInterval
             while !Task.isCancelled {
                 do {
@@ -804,13 +894,11 @@ public final class DashboardModel {
                     return
                 }
                 guard !Task.isCancelled, self.isStarted else { return }
-                let started = clock.now
-                await self.refreshAll(forceQuota: false)
+                await self.refreshAutomatically()
                 guard !Task.isCancelled, self.isStarted else { return }
-                // The chosen interval is start-to-start, with scans kept serial.
-                // A two-second scan at a one-second setting starts its next scan
-                // when ready instead of adding another full second of sleep.
-                delay = max(.zero, self.effectiveBackgroundRefreshInterval - started.duration(to: clock.now))
+                // Slow scans retain a full pause instead of turning a short
+                // configured interval into continuous helper execution.
+                delay = self.effectiveBackgroundRefreshInterval
             }
         }
     }

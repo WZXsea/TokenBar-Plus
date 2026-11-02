@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::NaiveDate;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::parse_cache::{CachedMessage, ParseCache};
 use crate::pricing::CodexPricing;
 use crate::usage::{CostSource, ServiceTier, UnifiedMessage};
 
@@ -29,14 +31,22 @@ pub fn parse_local_codex_messages(
     let paths = discover_codex_files(&options)?;
     let mut messages = Vec::new();
     let mut seen_dedup_keys = HashSet::new();
+    let cache = ParseCache::open(options.home_dir.as_deref());
 
     let parsed_files = paths
         .par_iter()
-        .map(|path| parser::parse_codex_file(path).ok())
+        .map(|path| {
+            let parse = || parser::parse_codex_file(path).map(CachedCodexFile::from);
+            cache.as_ref().map_or_else(parse, |cache| cache.get_or_try_parse_when("codex", path, parse, |parsed| parsed.read_complete)).ok()
+        })
         .collect::<Vec<_>>();
+    let mut identities = Vec::new();
     let mut service_tier_snapshots_by_physical = HashMap::new();
     for (path, parsed_file) in paths.iter().zip(parsed_files) {
         let path_text = path.to_string_lossy().into_owned();
+        if let Some(identity) = cached_session_identity(path, cache.as_ref()) {
+            identities.push(identity);
+        }
         let Some(parsed_file) = parsed_file else {
             continue;
         };
@@ -46,7 +56,8 @@ pub fn parse_local_codex_messages(
                 parsed_file.service_tier_snapshots,
             );
         }
-        for mut message in parsed_file.messages {
+        for message in parsed_file.messages {
+            let mut message = UnifiedMessage::from(message);
             message.session_path = Some(path_text.clone());
             message.refresh_derived_fields();
             if message
@@ -62,7 +73,7 @@ pub fn parse_local_codex_messages(
 
     assign_subagent_messages_to_root_sessions(
         &mut messages,
-        &paths,
+        identities,
         &service_tier_snapshots_by_physical,
     );
     for message in &mut messages {
@@ -75,6 +86,24 @@ pub fn parse_local_codex_messages(
         messages.retain(|message| message.date.as_str() <= until);
     }
     Ok(messages)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CachedCodexFile {
+    messages: Vec<CachedMessage>,
+    service_tier_snapshots: Vec<parser::ServiceTierSnapshot>,
+    #[serde(skip)]
+    read_complete: bool,
+}
+
+impl From<parser::ParsedCodexFile> for CachedCodexFile {
+    fn from(value: parser::ParsedCodexFile) -> Self {
+        Self {
+            messages: value.messages.into_iter().map(CachedMessage::from).collect(),
+            service_tier_snapshots: value.service_tier_snapshots,
+            read_complete: value.read_complete,
+        }
+    }
 }
 
 fn apply_pricing(message: &mut UnifiedMessage, pricing: &CodexPricing) {
@@ -211,7 +240,7 @@ fn collect_jsonl_files(directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexSessionIdentity {
     physical_id: String,
     upstream_id: String,
@@ -219,25 +248,31 @@ struct CodexSessionIdentity {
     started_at_ms: Option<i64>,
 }
 
-fn read_codex_session_identity(path: &Path) -> Option<CodexSessionIdentity> {
-    let reader = BufReader::new(fs::File::open(path).ok()?);
-    for line in reader.lines().map_while(Result::ok).take(64) {
+fn cached_session_identity(path: &Path, cache: Option<&ParseCache>) -> Option<CodexSessionIdentity> {
+    let read = || read_codex_session_identity(path);
+    cache.map_or_else(read, |cache| cache.get_or_try_parse("codex-identity", path, read)).ok().flatten()
+}
+
+pub(crate) fn cached_upstream_session_id(path: &Path, cache: Option<&ParseCache>) -> Option<String> {
+    cached_session_identity(path, cache).map(|identity| identity.upstream_id)
+}
+
+fn read_codex_session_identity(path: &Path) -> Result<Option<CodexSessionIdentity>, String> {
+    let reader = BufReader::new(fs::File::open(path).map_err(|error| error.to_string())?);
+    for line in reader.lines().take(64) {
+        let line = line.map_err(|error| error.to_string())?;
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         if entry.get("type").and_then(Value::as_str) != Some("session_meta") {
             continue;
         }
-        let payload = entry.get("payload")?;
+        let Some(payload) = entry.get("payload") else { return Ok(None) };
         let started_at_ms = entry
             .get("timestamp")
             .or_else(|| payload.get("timestamp"))
             .and_then(codex_timestamp_ms);
-        let upstream_id = payload
-            .get("id")?
-            .as_str()
-            .filter(|id| !id.is_empty())?
-            .to_string();
+        let Some(upstream_id) = payload.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) else { return Ok(None) };
         let structured_parent = payload
             .get("source")
             .and_then(|source| source.get("subagent"))
@@ -250,18 +285,18 @@ fn read_codex_session_identity(path: &Path) -> Option<CodexSessionIdentity> {
         .then(|| payload.get("forked_from_id").and_then(Value::as_str))
         .flatten()
         .filter(|id| !id.is_empty());
-        return Some(CodexSessionIdentity {
+        return Ok(Some(CodexSessionIdentity {
             physical_id: path
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            upstream_id,
+            upstream_id: upstream_id.to_string(),
             subagent_parent_id: structured_parent.or(legacy_parent).map(str::to_string),
             started_at_ms,
-        });
+        }));
     }
-    None
+    Ok(None)
 }
 
 fn codex_timestamp_ms(value: &Value) -> Option<i64> {
@@ -277,16 +312,12 @@ fn codex_timestamp_ms(value: &Value) -> Option<i64> {
 /// deduplication. Adapted from tokscale-core's MIT-licensed implementation.
 fn assign_subagent_messages_to_root_sessions(
     messages: &mut [UnifiedMessage],
-    paths: &[PathBuf],
+    mut identities: Vec<CodexSessionIdentity>,
     service_tier_snapshots_by_physical: &HashMap<
         String,
         Vec<parser::ServiceTierSnapshot>,
     >,
 ) {
-    let mut identities = paths
-        .iter()
-        .filter_map(|path| read_codex_session_identity(path))
-        .collect::<Vec<_>>();
     identities.sort_by(|left, right| left.physical_id.cmp(&right.physical_id));
 
     let upstream_by_physical = identities
@@ -510,4 +541,81 @@ fn service_tier_at(
     let first_tier = tiers.next()?;
     (first_tier != ServiceTier::Unknown && tiers.all(|tier| tier == first_tier))
         .then_some(first_tier)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::pricing::FastPricingBasis;
+    use std::io::Write;
+
+    fn fixture(id: &str, parent: Option<&str>, day: &str) -> String {
+        let source = parent.map(|id| serde_json::json!({"subagent":{"thread_spawn":{"parent_thread_id":id}}}));
+        let mut lines = vec![serde_json::json!({"type":"session_meta","timestamp":format!("{day}T12:00:00Z"),"payload":{"id":id,"source":source}})];
+        if parent.is_none() {
+            lines.push(serde_json::json!({"type":"event_msg","timestamp":format!("{day}T12:00:00Z"),"payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"fast"}}}));
+        }
+        lines.extend([
+            serde_json::json!({"type":"turn_context","timestamp":format!("{day}T12:00:01Z"),"payload":{"model":"gpt-5.6-sol","turn_id":format!("{id}-turn")}}),
+            serde_json::json!({"type":"event_msg","timestamp":format!("{day}T12:00:01Z"),"payload":{"type":"task_started","turn_id":format!("{id}-turn")}}),
+            serde_json::json!({"type":"event_msg","timestamp":format!("{day}T12:00:01Z"),"payload":{"type":"user_message","message":"bounded prompt preview"}}),
+            serde_json::json!({"type":"event_msg","timestamp":format!("{day}T12:00:02Z"),"payload":{"type":"agent_message","message":"bounded answer preview"}}),
+            token(day, if parent.is_some() { 30 } else { 10 }),
+        ]);
+        lines.into_iter().map(|line| line.to_string() + "\n").collect()
+    }
+
+    fn token(day: &str, input: i64) -> serde_json::Value {
+        serde_json::json!({"type":"event_msg","timestamp":format!("{day}T12:00:03Z"),"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"output_tokens":2},"last_token_usage":{"input_tokens":10,"output_tokens":2}}}})
+    }
+
+    #[test]
+    fn cached_codex_preserves_turns_lineage_reprices_and_invalidates_file_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".codex/sessions");
+        fs::create_dir_all(&directory).unwrap();
+        let root = directory.join("rollout-root.jsonl");
+        let base = fixture("root", None, "2026-01-01");
+        let appended = token("2026-01-02", 20).to_string();
+        fs::write(&root, format!("{base}{}", &appended[..30])).unwrap();
+        let options = LocalParseOptions { home_dir: home.path().to_str().map(str::to_string), ..Default::default() };
+        let pricing = CodexPricing::bundled();
+        let cold = parse_local_codex_messages(options.clone(), &pricing).unwrap();
+        let warm = parse_local_codex_messages(options.clone(), &pricing).unwrap();
+        assert_eq!(cold, warm);
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].source_turn_id.as_deref(), Some("root-turn"));
+        assert_eq!(cold[0].content_preview.as_deref(), Some("bounded prompt preview"));
+        assert_eq!(cold[0].output_preview, None);
+
+        fs::OpenOptions::new().append(true).open(&root).unwrap().write_all(format!("{}\n", &appended[30..]).as_bytes()).unwrap();
+        let child = directory.join("rollout-child.jsonl");
+        fs::write(&child, fixture("child", Some("root"), "2026-01-01").replace("T12:00:", "T12:01:")).unwrap();
+        let changed = parse_local_codex_messages(options.clone(), &pricing).unwrap();
+        assert_eq!(changed.len(), 3);
+        assert_eq!(changed, parse_local_codex_messages(options.clone(), &pricing).unwrap());
+        let child_message = changed.iter().find(|message| message.is_subagent).unwrap();
+        assert_eq!(child_message.session_id, "rollout-root");
+        assert_eq!(child_message.service_tier, ServiceTier::Fast);
+        assert_eq!(child_message.output_preview.as_deref(), Some("bounded answer preview"));
+        let repriced = parse_local_codex_messages(options.clone(), &CodexPricing::with_fast_pricing(FastPricingBasis::ChatGptSubscription)).unwrap();
+        assert_ne!(repriced[0].cost, changed[0].cost);
+        let day_two = parse_local_codex_messages(LocalParseOptions { since: Some("2026-01-02".to_string()), until: Some("2026-01-02".to_string()), ..options.clone() }, &pricing).unwrap();
+        assert_eq!(day_two.len(), 1);
+        assert_eq!(day_two[0].tokens.input, 10);
+
+        let replacement = directory.join("replacement.tmp");
+        fs::write(&replacement, &base).unwrap();
+        fs::rename(replacement, &root).unwrap();
+        fs::remove_file(child).unwrap();
+        assert_eq!(parse_local_codex_messages(options.clone(), &pricing).unwrap(), cold);
+        fs::OpenOptions::new().append(true).open(&root).unwrap().write_all(b"{\"ignored\":\"\xe4").unwrap();
+        assert_eq!(parse_local_codex_messages(options.clone(), &pricing).unwrap(), cold);
+        let cache = ParseCache::open(options.home_dir.as_deref()).unwrap();
+        assert!(cache.load::<CachedCodexFile>("codex", &root, &crate::parse_cache::Fingerprint::read(&root).unwrap()).is_none());
+        fs::OpenOptions::new().append(true).open(&root).unwrap().write_all(b"\xb8\xad\"}\n").unwrap();
+        assert_eq!(parse_local_codex_messages(options.clone(), &pricing).unwrap(), cold);
+        fs::write(root, "").unwrap();
+        assert!(parse_local_codex_messages(options, &pricing).unwrap().is_empty());
+    }
 }

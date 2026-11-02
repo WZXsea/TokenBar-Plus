@@ -14,6 +14,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::pricing::AnthropicPricing;
+use crate::parse_cache::{CachedMessage, FileRead, ParseCache};
 use crate::usage::{
     content_preview_from_str, normalize_workspace_key, workspace_label_from_key,
     CacheWriteBreakdown, CostSource, TokenBreakdown, UnifiedMessage,
@@ -45,16 +46,25 @@ pub fn parse_local_claude_messages(
 ) -> Result<Vec<UnifiedMessage>, String> {
     let paths = discover_claude_files(&options)?;
     let session_aliases = desktop_session_aliases(&options);
+    let cache = ParseCache::open(options.home_dir.as_deref());
     let parsed = paths
         .par_iter()
-        .map(|path| parse_claude_file(path))
+        .map(|path| {
+            let parse = || parse_claude_file(path).map(|read| FileRead {
+                value: read.value.into_iter().map(CachedMessage::from).collect::<Vec<_>>(),
+                complete: read.complete,
+            });
+            cache.as_ref().map_or_else(parse, |cache| cache.get_or_try_parse_when("claude", path, parse, |read| read.complete)).map(|read| read.value).unwrap_or_default()
+        })
         .collect::<Vec<_>>();
 
     let mut messages = Vec::new();
     let mut seen_dedup_keys = HashSet::new();
     for (path, file_messages) in paths.iter().zip(parsed) {
         let path_text = path.to_string_lossy().into_owned();
-        for mut message in file_messages {
+        for message in file_messages {
+            let mut message = UnifiedMessage::from(message);
+            message.refresh_derived_fields();
             message.session_path = Some(path_text.clone());
             if let Some(current_id) = session_aliases.get(&message.session_id) {
                 message.session_id.clone_from(current_id);
@@ -244,10 +254,8 @@ fn collect_jsonl_files(directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
-    let Ok(file) = fs::File::open(path) else {
-        return Vec::new();
-    };
+fn parse_claude_file(path: &Path) -> Result<FileRead<Vec<UnifiedMessage>>, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
     let physical_session_id = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -266,8 +274,13 @@ fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut last_provider = None;
     let mut messages: Vec<UnifiedMessage> = Vec::new();
     let mut dedup_indices = HashMap::new();
+    let mut read_complete = true;
 
-    for line in BufReader::new(file).lines().map_while(Result::ok) {
+    for line in BufReader::new(file).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => { read_complete = false; break; }
+        };
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -415,7 +428,7 @@ fn parse_claude_file(path: &Path) -> Vec<UnifiedMessage> {
         pending_turn_start = false;
         request_started_at = None;
     }
-    messages
+    Ok(FileRead { value: messages, complete: read_complete })
 }
 
 fn merge_streaming_duplicate(
@@ -759,7 +772,7 @@ mod tests {
         .unwrap();
 
         drop(file);
-        let messages = parse_claude_file(&path);
+        let messages = parse_claude_file(&path).unwrap().value;
         let _ = fs::remove_file(&path);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].client, "claude");
@@ -782,5 +795,33 @@ mod tests {
         assert_eq!(messages[0].output_preview.as_deref(), Some("Done"));
         assert!(messages[0].is_turn_start);
         assert!(!messages[0].is_subagent);
+    }
+
+    #[test]
+    fn cached_claude_keeps_valid_utf8_prefix_and_refreshes_completed_title() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".claude/projects/project");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("session.jsonl");
+        fs::write(&path, concat!(
+            "{\"type\":\"custom-title\",\"customTitle\":\"original title\"}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-01-01T12:00:00Z\",\"message\":{\"content\":\"small prompt\"}}\n",
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-01-01T12:00:01Z\",\"message\":{\"id\":\"answer\",\"model\":\"claude-sonnet-4-6\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"content\":[{\"type\":\"text\",\"text\":\"small answer\"}]}}\n"
+        )).unwrap();
+        let options = LocalParseOptions { home_dir: home.path().to_str().map(str::to_string), ..Default::default() };
+        let pricing = AnthropicPricing::bundled_for_date(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+        let cold = parse_local_claude_messages(options.clone(), &pricing).unwrap();
+        assert_eq!(cold.len(), 1);
+        assert_eq!(parse_local_claude_messages(options.clone(), &pricing).unwrap(), cold);
+        let key = ("claude".to_string(), "session".to_string());
+        assert_eq!(crate::load_claude_session_titles_with_cache_home(&cold, options.home_dir.as_deref())[&key], "original title");
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"{\"type\":\"custom-title\",\"customTitle\":\"\xe4").unwrap();
+        assert_eq!(parse_local_claude_messages(options.clone(), &pricing).unwrap(), cold);
+        assert_eq!(crate::load_claude_session_titles_with_cache_home(&cold, options.home_dir.as_deref())[&key], "original title");
+        let cache = ParseCache::open(options.home_dir.as_deref()).unwrap();
+        assert!(cache.load::<FileRead<Vec<CachedMessage>>>("claude", &path, &crate::parse_cache::Fingerprint::read(&path).unwrap()).is_none());
+        fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"\xb8\xad\"}\n").unwrap();
+        assert_eq!(parse_local_claude_messages(options.clone(), &pricing).unwrap(), cold);
+        assert_eq!(crate::load_claude_session_titles_with_cache_home(&cold, options.home_dir.as_deref())[&key], "中");
     }
 }

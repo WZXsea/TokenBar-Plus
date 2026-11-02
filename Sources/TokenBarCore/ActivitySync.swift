@@ -690,6 +690,8 @@ public struct SynchronizedActivityService: ActivityProviding, Sendable {
         self.now = now
     }
 
+    public func stop() { self.local.stop() }
+
     public func fetchActivity(
         sinceWeeklyResetAt: Date?,
         statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot

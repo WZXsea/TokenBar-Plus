@@ -4,6 +4,10 @@ import Testing
 
 private actor ResponsiveActivityProvider: ActivityProviding {
     private(set) var calls = 0
+    private(set) var startedAt: [ContinuousClock.Instant] = []
+    private(set) var completedAt: [ContinuousClock.Instant] = []
+    private(set) var maximumConcurrentCalls = 0
+    private var activeCalls = 0
     private var blocked = false
     private var failsNextRequest = false
     private var pending: [CheckedContinuation<Void, Never>] = []
@@ -21,6 +25,13 @@ private actor ResponsiveActivityProvider: ActivityProviding {
 
     func fetchActivity(sinceWeeklyResetAt: Date?, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot {
         self.calls += 1
+        self.startedAt.append(ContinuousClock().now)
+        self.activeCalls += 1
+        self.maximumConcurrentCalls = max(self.maximumConcurrentCalls, self.activeCalls)
+        defer {
+            self.activeCalls -= 1
+            self.completedAt.append(ContinuousClock().now)
+        }
         let fails = self.failsNextRequest
         self.failsNextRequest = false
         if self.blocked {
@@ -33,10 +44,21 @@ private actor ResponsiveActivityProvider: ActivityProviding {
 
 private actor ResponsiveQuotaProvider: QuotaProviding {
     let platform = TokenPlatform.codex
+    private(set) var calls = 0
     private var blocked: Bool
+    private var usedPercent = 20.0
     private var pending: CheckedContinuation<Void, Never>?
+    private let now: @Sendable () -> Date
 
-    init(blocked: Bool = false) { self.blocked = blocked }
+    init(blocked: Bool = false, now: @escaping @Sendable () -> Date = { Date(timeIntervalSince1970: 1_800_000_000) }) {
+        self.blocked = blocked
+        self.now = now
+    }
+
+    func block(usedPercent: Double) {
+        self.blocked = true
+        self.usedPercent = usedPercent
+    }
 
     func release() {
         self.blocked = false
@@ -45,17 +67,28 @@ private actor ResponsiveQuotaProvider: QuotaProviding {
     }
 
     func fetchQuota() async throws -> QuotaSnapshot {
+        self.calls += 1
         if self.blocked {
             await withCheckedContinuation { self.pending = $0 }
         }
-        return TestFixtures.quota(usedPercent: 20)
+        let snapshot = TestFixtures.quota(usedPercent: self.usedPercent)
+        return QuotaSnapshot(session: snapshot.session, weekly: snapshot.weekly,
+            resetCredits: snapshot.resetCredits, updatedAt: self.now())
     }
+}
+
+private final class ResponsiveTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = Date(timeIntervalSince1970: 1_800_000_000)
+
+    var now: Date { self.lock.withLock { self.value } }
+    func advance(by seconds: TimeInterval) { self.lock.withLock { self.value.addTimeInterval(seconds) } }
 }
 
 @MainActor
 @Suite("Responsive local refresh")
 struct ResponsiveRefreshTests {
-    @Test("Active source events refresh immediately and a burst during a scan coalesces into one follow-up")
+    @Test("Active source events and a burst during a scan coalesce into one follow-up")
     func sourceEventsRefreshAndCatchUp() async {
         let activity = ResponsiveActivityProvider()
         let model = self.model(activity: activity, quota: ResponsiveQuotaProvider())
@@ -102,6 +135,77 @@ struct ResponsiveRefreshTests {
         await quota.release()
         await refresh.value
         #expect(await activity.calls == 1)
+    }
+
+    @Test("A slow scan and simultaneous timer/source events retain a full pause before the next scan")
+    func slowScansPauseAndCoalesceTimerEvents() async throws {
+        let activity = ResponsiveActivityProvider()
+        let interval: Duration = .milliseconds(80)
+        let model = DashboardModel(quotaService: ResponsiveQuotaProvider(), activityService: activity, cache: nil,
+            quotaRefreshInterval: interval, activityRefreshInterval: interval)
+        await model.start()
+        defer { model.stop() }
+
+        await activity.setBlocked(true)
+        model.notifyActivityChanged()
+        #expect(await self.eventually { await activity.calls == 2 })
+        model.notifyActivityChanged()
+        model.notifyActivityChanged()
+        try await Task.sleep(for: .milliseconds(160))
+        await activity.setBlocked(false)
+        #expect(await self.eventually { await activity.calls >= 3 })
+
+        let ended = await activity.completedAt
+        let started = await activity.startedAt
+        let secondEnded = try #require(ended.dropFirst().first)
+        let thirdStarted = try #require(started.dropFirst(2).first)
+        #expect(secondEnded.duration(to: thirdStarted) >= interval)
+        #expect(await activity.maximumConcurrentCalls == 1)
+    }
+
+    @Test("Manual refresh covers queued source events and stopping cancels a deferred follow-up")
+    func manualRefreshAndStopHandleDeferredEvents() async throws {
+        let activity = ResponsiveActivityProvider()
+        let model = self.model(activity: activity, quota: ResponsiveQuotaProvider())
+        await model.start()
+        model.notifyActivityChanged()
+        await model.refreshActivity()
+        #expect(await activity.calls == 2)
+        model.notifyActivityChanged()
+        model.stop()
+        try await Task.sleep(for: .milliseconds(1100))
+        #expect(await activity.calls == 2)
+    }
+
+    @Test("Rescheduling or waking a timer preserves an in-flight quota request, while stopping cancels it")
+    func quotaSurvivesTimerRescheduling() async {
+        let activity = ResponsiveActivityProvider()
+        let clock = ResponsiveTestClock()
+        let quota = ResponsiveQuotaProvider(now: { clock.now })
+        let model = DashboardModel(quotaService: quota, activityService: activity, cache: nil,
+            quotaRefreshInterval: .milliseconds(40), activityRefreshInterval: .milliseconds(40),
+            sleep: { try await Task.sleep(for: $0) }, now: { clock.now })
+        await model.start()
+        await quota.block(usedPercent: 70)
+        clock.advance(by: 61)
+        model.notifyActivityChanged()
+        #expect(await self.eventually { await quota.calls == 2 })
+
+        model.updateBackgroundRefreshInterval(.milliseconds(80))
+        clock.advance(by: 61)
+        model.notifyActivityChanged()
+        await quota.release()
+        #expect(await self.eventually { model.quotaSnapshot?.weekly?.usedPercent == 70 })
+        #expect(await quota.calls == 2)
+
+        await quota.block(usedPercent: 85)
+        clock.advance(by: 61)
+        model.notifyActivityChanged()
+        #expect(await self.eventually { await quota.calls == 3 })
+        model.stop()
+        await quota.release()
+        #expect(await self.eventually { !model.quota.isRefreshing })
+        #expect(model.quotaSnapshot?.weekly?.usedPercent == 70)
     }
 
     private func model(activity: ResponsiveActivityProvider, quota: ResponsiveQuotaProvider) -> DashboardModel {

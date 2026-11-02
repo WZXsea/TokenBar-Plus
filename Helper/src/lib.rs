@@ -20,6 +20,7 @@ pub mod pricing;
 pub mod openrouter;
 pub mod usage;
 pub mod zcode;
+mod parse_cache;
 
 pub use usage::StatisticsTimeZone;
 
@@ -655,6 +656,14 @@ pub fn load_codex_session_titles(
     messages: &[UnifiedMessage],
     session_index_path: &Path,
 ) -> SessionTitleMap {
+    load_codex_session_titles_with_cache_home(messages, session_index_path, None)
+}
+
+pub fn load_codex_session_titles_with_cache_home(
+    messages: &[UnifiedMessage],
+    session_index_path: &Path,
+    cache_home: Option<&str>,
+) -> SessionTitleMap {
     let titles_by_upstream = read_codex_title_index(session_index_path);
     if titles_by_upstream.is_empty() {
         return HashMap::new();
@@ -662,6 +671,7 @@ pub fn load_codex_session_titles(
 
     let mut seen_paths = HashSet::new();
     let mut titles_by_session = HashMap::new();
+    let cache = parse_cache::ParseCache::open(cache_home);
     for message in messages {
         if message.client != "codex" {
             continue;
@@ -674,7 +684,7 @@ pub fn load_codex_session_titles(
             continue;
         }
 
-        let Some(upstream_id) = read_codex_upstream_session_id(Path::new(path)) else {
+        let Some(upstream_id) = codex::cached_upstream_session_id(Path::new(path), cache.as_ref()) else {
             continue;
         };
         if let Some(title) = titles_by_upstream.get(&upstream_id) {
@@ -694,8 +704,13 @@ pub fn load_codex_session_titles(
 /// transcripts cannot name the grouped session. Prefer the current user
 /// transcript's title, with prior user transcripts as a fallback.
 pub fn load_claude_session_titles(messages: &[UnifiedMessage]) -> SessionTitleMap {
+    load_claude_session_titles_with_cache_home(messages, None)
+}
+
+pub fn load_claude_session_titles_with_cache_home(messages: &[UnifiedMessage], cache_home: Option<&str>) -> SessionTitleMap {
     let mut seen_paths = HashSet::new();
     let mut titles_by_session = HashMap::new();
+    let cache = parse_cache::ParseCache::open(cache_home);
     for message in messages {
         if message.client != "claude" {
             continue;
@@ -708,7 +723,8 @@ pub fn load_claude_session_titles(messages: &[UnifiedMessage]) -> SessionTitleMa
             continue;
         }
 
-        if let Some(title) = read_claude_custom_title(Path::new(path)) {
+        let read_title = || read_claude_custom_title(Path::new(path));
+        if let Ok(parse_cache::FileRead { value: Some(title), .. }) = cache.as_ref().map_or_else(read_title, |cache| cache.get_or_try_parse_when("claude-title", Path::new(path), read_title, |read| read.complete)) {
             let key = ("claude".to_string(), message.session_id.clone());
             if physical_session_id(message) == message.session_id {
                 titles_by_session.insert(key, title);
@@ -721,10 +737,15 @@ pub fn load_claude_session_titles(messages: &[UnifiedMessage]) -> SessionTitleMa
     titles_by_session
 }
 
-fn read_claude_custom_title(path: &Path) -> Option<String> {
-    let reader = BufReader::new(File::open(path).ok()?);
+fn read_claude_custom_title(path: &Path) -> Result<parse_cache::FileRead<Option<String>>, String> {
+    let reader = BufReader::new(File::open(path).map_err(|error| error.to_string())?);
     let mut title = None;
-    for line in reader.lines().map_while(Result::ok) {
+    let mut read_complete = true;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => { read_complete = false; break; }
+        };
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -740,7 +761,7 @@ fn read_claude_custom_title(path: &Path) -> Option<String> {
         let value = value.trim();
         title = (!value.is_empty()).then(|| value.to_string());
     }
-    title
+    Ok(parse_cache::FileRead { value: title, complete: read_complete })
 }
 
 fn read_codex_title_index(path: &Path) -> HashMap<String, String> {
@@ -765,25 +786,6 @@ fn read_codex_title_index(path: &Path) -> HashMap<String, String> {
         }
     }
     titles
-}
-
-fn read_codex_upstream_session_id(path: &Path) -> Option<String> {
-    let reader = BufReader::new(File::open(path).ok()?);
-    for line in reader.lines().map_while(Result::ok).take(64) {
-        let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if entry.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
-            continue;
-        }
-        return entry
-            .get("payload")?
-            .get("id")?
-            .as_str()
-            .map(str::to_string)
-            .filter(|id| !id.is_empty());
-    }
-    None
 }
 
 /// Builds the JSON contract consumed by TokenBar's Swift core.

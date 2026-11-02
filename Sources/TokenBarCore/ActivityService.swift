@@ -1,6 +1,8 @@
 import Foundation
 
 public protocol ActivityProviding: Sendable {
+    func stop()
+
     func fetchHistory(days: Int, endDate: String, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot
 
     func fetchActivity(
@@ -17,6 +19,8 @@ public protocol ActivityProviding: Sendable {
 }
 
 public extension ActivityProviding {
+    func stop() {}
+
     func fetchHistory(days: Int, endDate: String, statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot {
         throw ActivityServiceError.historyUnavailable
     }
@@ -55,11 +59,17 @@ public extension ActivityProviding {
 }
 
 public protocol ActivityHelperRunning: Sendable {
+    func stop()
+
     func run(
         executableURL: URL,
         arguments: [String],
         environment: [String: String],
         timeout: TimeInterval) async throws -> Data
+}
+
+public extension ActivityHelperRunning {
+    func stop() {}
 }
 
 public struct SubprocessActivityHelperRunner: ActivityHelperRunning, Sendable {
@@ -114,6 +124,7 @@ public struct ActivityService: ActivityProviding, Sendable {
     private let openRouterPricingCatalog: (any OpenRouterPricingCatalogUpdating)?
     private let resolveHelper: @Sendable () throws -> URL
     private let runner: any ActivityHelperRunning
+    private let historyRunner: any ActivityHelperRunning
 
     public init(
         helperURL: URL? = nil,
@@ -126,7 +137,7 @@ public struct ActivityService: ActivityProviding, Sendable {
         openRouterPricingCatalog: (any OpenRouterPricingCatalogUpdating)? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         timeout: TimeInterval = 120,
-        runner: any ActivityHelperRunning = SubprocessActivityHelperRunner())
+        runner: (any ActivityHelperRunning)? = nil)
     {
         self.arguments = arguments
         self.memoryDatabaseURLProvider = memoryDatabaseURLProvider ?? { memoryDatabaseURL }
@@ -136,7 +147,15 @@ public struct ActivityService: ActivityProviding, Sendable {
         self.openRouterPricingCatalog = openRouterPricingCatalog
         self.environment = environment
         self.timeout = timeout
-        self.runner = runner
+        if let runner {
+            self.runner = runner
+        } else if helperURL != nil || !(environment["TOKENBAR_HELPER_PATH"]?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
+            // Custom helper overrides keep the original single-snapshot CLI contract.
+            self.runner = SubprocessActivityHelperRunner()
+        } else {
+            self.runner = PersistentActivityHelperRunner()
+        }
+        self.historyRunner = runner ?? SubprocessActivityHelperRunner()
         self.resolveHelper = {
             try Self.resolveHelperExecutable(explicitURL: helperURL, environment: environment)
         }
@@ -165,7 +184,10 @@ public struct ActivityService: ActivityProviding, Sendable {
         self.timeout = timeout
         self.resolveHelper = resolveHelper
         self.runner = runner
+        self.historyRunner = runner
     }
+
+    public func stop() { self.runner.stop() }
 
     public func fetchActivity(
         sinceWeeklyResetAt: Date?,
@@ -281,7 +303,8 @@ public struct ActivityService: ActivityProviding, Sendable {
         snapshotArguments: [String],
         statisticsTimeZone: TokenBarStatisticsTimeZone) async throws -> ActivitySnapshot
     {
-        let data = try await self.runner.run(
+        let runner = snapshotArguments.isEmpty ? self.runner : self.historyRunner
+        let data = try await runner.run(
             executableURL: helperURL,
             arguments: self.helperArguments(
                 sinceWeeklyResetAtByPlatform: sinceWeeklyResetAtByPlatform,
